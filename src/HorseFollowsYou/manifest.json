@@ -1,0 +1,10 @@
+{
+  "Name": "HorseFollowsYou",
+  "Author": "kaniclub",
+  "Version": "1.0.0",
+  "Description": "Horse follows you",
+  "UniqueID": "kaniclub.HorseFollowsYou",
+  "EntryDll": "HorseFollowsYou.dll",
+  "MinimumApiVersion": "4.1.0",
+  "UpdateKeys": [ "Nexus:43745" ]
+}

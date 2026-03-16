@@ -1,0 +1,58 @@
+# ----------------------------
+# build outputs
+# ----------------------------
+**/bin/
+**/obj/
+
+# ----------------------------
+# Visual Studio / Rider / VS Code
+# ----------------------------
+.vs/
+.idea/
+.vscode/
+
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# ----------------------------
+# OS files
+# ----------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----------------------------
+# logs
+# ----------------------------
+*.log
+
+# ----------------------------
+# local / temporary / test output
+# ----------------------------
+tmp/
+temp/
+artifacts/
+dist/
+release/
+releases/
+publish/
+
+# ----------------------------
+# packaged files
+# ----------------------------
+*.zip
+*.7z
+*.rar
+
+# ----------------------------
+# SMAPI / local runtime files
+# ----------------------------
+config.json
+
+# ----------------------------
+# generated documentation or export files
+# ----------------------------
+*.bak
+*.tmp
