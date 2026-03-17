@@ -178,6 +178,7 @@ internal sealed class HorseFollowManager
         if (this.wasMountedLastTick)
         {
             this.wasMountedLastTick = false;
+            this.SyncHorseFacingAfterDismount();
             if (this.followEnabled)
             {
                 this.EnterFollowPending();
@@ -299,11 +300,33 @@ internal sealed class HorseFollowManager
         this.currentPath = null;
         this.currentPathIndex = 0;
         this.lastTargetTile = null;
+        this.currentMoveDirection = -1;
+        this.currentAnimationDirection = -1;
+        this.currentAnimationIntervalMs = -1;
 
         if (Game1.player.mount is Horse horse)
         {
             this.TrackHorse(horse);
+            this.lastFacingDirection = horse.FacingDirection;
         }
+    }
+
+    // ----------------------------
+    // 降馬直後の向きを同期する
+    // ----------------------------
+    private void SyncHorseFacingAfterDismount()
+    {
+        if (this.trackedHorse is null)
+        {
+            return;
+        }
+
+        int facingDirection = Game1.player.FacingDirection;
+        this.trackedHorse.faceDirection(facingDirection);
+        this.lastFacingDirection = facingDirection;
+        this.currentMoveDirection = -1;
+        this.currentAnimationDirection = -1;
+        this.currentAnimationIntervalMs = -1;
     }
 
     // ----------------------------
