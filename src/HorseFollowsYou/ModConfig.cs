@@ -62,4 +62,9 @@ internal sealed class ModConfig
     // - 馬とプレイヤーの衝突を無視する
     // ----------------------------
     public bool IgnorePlayerCollision { get; set; } = false;
+
+    // ----------------------------
+    // デバッグモード
+    // ----------------------------
+    public bool DebugMode { get; set; } = false;
 }

@@ -14,7 +14,6 @@ namespace HorseFollowsYou.Services;
 // - 同行トグルの管理
 // - 経路保持
 // - 自前移動
-// - ワープ処理
 // ----------------------------
 internal sealed class HorseFollowManager
 {
@@ -51,19 +50,15 @@ internal sealed class HorseFollowManager
     private int currentMoveDirection = -1;
     private int currentAnimationDirection = -1;
     private int currentAnimationIntervalMs = -1;
-    private bool warpRetryPending;
-    private long nextWarpRetryAtMs;
-    private long warpRetryExpireAtMs;
-    private Point? lastWarpRetryPlayerTile;
 
     // ----------------------------
     // 管理クラスを初期化する
     // ----------------------------
-    public HorseFollowManager(ITranslationHelper translation, System.Func<ModConfig> getConfig)
+    public HorseFollowManager(ITranslationHelper translation, System.Func<ModConfig> getConfig, IMonitor monitor)
     {
         this.translation = translation;
         this.getConfig = getConfig;
-        this.warpCoordinator = new HorseWarpCoordinator();
+        this.warpCoordinator = new HorseWarpCoordinator(getConfig, monitor);
         this.Reset();
     }
 
@@ -90,10 +85,7 @@ internal sealed class HorseFollowManager
         this.currentMoveDirection = -1;
         this.currentAnimationDirection = -1;
         this.currentAnimationIntervalMs = -1;
-        this.warpRetryPending = false;
-        this.nextWarpRetryAtMs = 0;
-        this.warpRetryExpireAtMs = 0;
-        this.lastWarpRetryPlayerTile = null;
+        this.warpCoordinator.ResetRetryState();
     }
 
     // ----------------------------
@@ -141,13 +133,12 @@ internal sealed class HorseFollowManager
 
         if (this.trackedHorse.currentLocation == Game1.player.currentLocation)
         {
-            this.ClearWarpRetry();
+            this.warpCoordinator.ResetRetryState();
             this.EnterFollowPending();
             return;
         }
 
-        long nowMs = System.Environment.TickCount64;
-        if (this.TryWarpHorseToPlayerOrQueueRetry(nowMs))
+        if (this.TryWarpHorseToPlayer())
         {
             return;
         }
@@ -200,7 +191,7 @@ internal sealed class HorseFollowManager
 
         if (!this.followEnabled)
         {
-            this.ClearWarpRetry();
+            this.warpCoordinator.ResetRetryState();
             this.state = FollowState.Idle;
             this.StopHorse(this.trackedHorse);
             return;
@@ -213,13 +204,7 @@ internal sealed class HorseFollowManager
         // ----------------------------
         if (this.trackedHorse.currentLocation != Game1.player.currentLocation)
         {
-            if (!this.warpRetryPending)
-            {
-                this.state = FollowState.WarpBlocked;
-                return;
-            }
-
-            if (this.TryWarpHorseToPlayerOrQueueRetry(nowMs))
+            if (this.TryWarpHorseToPlayer())
             {
                 return;
             }
@@ -228,7 +213,7 @@ internal sealed class HorseFollowManager
             return;
         }
 
-        this.ClearWarpRetry();
+        this.warpCoordinator.ResetRetryState();
 
         if (Game1.activeClickableMenu is not null || Game1.eventUp || !Game1.player.canMove)
         {
@@ -294,7 +279,7 @@ internal sealed class HorseFollowManager
     // ----------------------------
     private void HandleMountedState()
     {
-        this.ClearWarpRetry();
+        this.warpCoordinator.ResetRetryState();
         this.state = FollowState.Mounted;
         this.wasMountedLastTick = true;
         this.currentPath = null;
@@ -352,7 +337,7 @@ internal sealed class HorseFollowManager
         }
         else
         {
-            this.ClearWarpRetry();
+            this.warpCoordinator.ResetRetryState();
             this.ShowMessage("message.follow_disabled");
             if (this.trackedHorse is not null)
             {
@@ -386,7 +371,7 @@ internal sealed class HorseFollowManager
     // ----------------------------
     private void EnterFollowPending()
     {
-        this.ClearWarpRetry();
+        this.warpCoordinator.ResetRetryState();
         this.state = FollowState.FollowPending;
         this.followPendingUntilMs = System.Environment.TickCount64 + this.getConfig().DismountDelayMilliseconds;
         this.InvalidatePath();
@@ -397,108 +382,24 @@ internal sealed class HorseFollowManager
     }
 
     // ----------------------------
-    // 別マップの馬を呼ぶか再試行予約する
+    // 別マップの馬をプレイヤー側へワープさせる
     // ----------------------------
-    private bool TryWarpHorseToPlayerOrQueueRetry(long nowMs)
+    private bool TryWarpHorseToPlayer()
     {
         if (this.trackedHorse is null || !this.getConfig().EnableWarpFollow)
         {
-            this.ClearWarpRetry();
+            this.warpCoordinator.ResetRetryState();
             return false;
-        }
-
-        if (!this.ShouldAttemptWarpRetry(nowMs))
-        {
-            this.state = FollowState.WarpBlocked;
-            return true;
         }
 
         HorseWarpCoordinator.WarpAttemptResult result = this.warpCoordinator.TryWarpHorseNearPlayer(this.trackedHorse, Game1.player);
-        switch (result)
+        if (result == HorseWarpCoordinator.WarpAttemptResult.Warped)
         {
-            case HorseWarpCoordinator.WarpAttemptResult.Warped:
-                this.ClearWarpRetry();
-                this.EnterFollowPending();
-                return true;
-
-            case HorseWarpCoordinator.WarpAttemptResult.RetryLaterNoRoom:
-                this.QueueWarpRetry(nowMs);
-                this.state = FollowState.WarpBlocked;
-                return true;
-
-            default:
-                this.ClearWarpRetry();
-                return false;
-        }
-    }
-
-    // ----------------------------
-    // 今ワープ再試行できるか判定する
-    // ----------------------------
-    private bool ShouldAttemptWarpRetry(long nowMs)
-    {
-        if (!this.warpRetryPending)
-        {
+            this.EnterFollowPending();
             return true;
         }
 
-        if (nowMs >= this.warpRetryExpireAtMs)
-        {
-            this.ClearWarpRetry();
-            return false;
-        }
-
-        Point playerTile = Game1.player.TilePoint;
-        if (this.lastWarpRetryPlayerTile is null || this.lastWarpRetryPlayerTile.Value != playerTile)
-        {
-            this.lastWarpRetryPlayerTile = playerTile;
-            this.nextWarpRetryAtMs = nowMs + this.GetWarpRetryIntervalMilliseconds();
-            return true;
-        }
-
-        return nowMs >= this.nextWarpRetryAtMs;
-    }
-
-    // ----------------------------
-    // ワープ再試行を予約する
-    // ----------------------------
-    private void QueueWarpRetry(long nowMs)
-    {
-        if (!this.warpRetryPending)
-        {
-            this.warpRetryPending = true;
-            this.warpRetryExpireAtMs = nowMs + this.GetWarpRetryWindowMilliseconds();
-        }
-
-        this.nextWarpRetryAtMs = nowMs + this.GetWarpRetryIntervalMilliseconds();
-        this.lastWarpRetryPlayerTile = Game1.player.TilePoint;
-    }
-
-    // ----------------------------
-    // ワープ再試行状態を消す
-    // ----------------------------
-    private void ClearWarpRetry()
-    {
-        this.warpRetryPending = false;
-        this.nextWarpRetryAtMs = 0;
-        this.warpRetryExpireAtMs = 0;
-        this.lastWarpRetryPlayerTile = null;
-    }
-
-    // ----------------------------
-    // ワープ再試行の間隔を返す
-    // ----------------------------
-    private int GetWarpRetryIntervalMilliseconds()
-    {
-        return 350;
-    }
-
-    // ----------------------------
-    // ワープ再試行の制限時間を返す
-    // ----------------------------
-    private int GetWarpRetryWindowMilliseconds()
-    {
-        return 4000;
+        return false;
     }
 
     // ----------------------------

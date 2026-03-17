@@ -24,7 +24,7 @@ public sealed class ModEntry : Mod
     public override void Entry(IModHelper helper)
     {
         this.config = this.NormalizeConfig(helper.ReadConfig<ModConfig>());
-        this.followManager = new HorseFollowManager(helper.Translation, () => this.config);
+        this.followManager = new HorseFollowManager(helper.Translation, () => this.config, this.Monitor);
 
         helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
