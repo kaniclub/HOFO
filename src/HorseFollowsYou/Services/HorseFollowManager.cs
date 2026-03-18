@@ -487,9 +487,12 @@ internal sealed class HorseFollowManager
             return false;
         }
 
+        // ----------------------------
+        // 設定時間以内は再探索しない
+        // ----------------------------
         if (this.movementService.IsPathFinished())
         {
-            return true;
+            return nowMs - this.lastPathBuildTimeMs >= this.GetPathRebuildMilliseconds();
         }
 
         if (this.lastTargetTile is null || this.lastTargetTile.Value != targetTile)
@@ -504,7 +507,7 @@ internal sealed class HorseFollowManager
 
         if (nowMs - this.movementService.GetLastHorseMoveTimeMs() >= this.GetPathRebuildMilliseconds() * 2)
         {
-            return true;
+            return nowMs - this.lastPathBuildTimeMs >= this.GetPathRebuildMilliseconds();
         }
 
         return false;
