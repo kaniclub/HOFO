@@ -45,6 +45,7 @@ internal sealed class HorseFollowManager
     private Point lastPlayerMoveDirection = Point.Zero;
     private long lastPathBuildTimeMs;
     private Point? lastTargetTile;
+    private bool pauseFollowUntilWarp;
 
     // ----------------------------
     // デバッグ描画用に現在の経路を返す
@@ -91,6 +92,7 @@ internal sealed class HorseFollowManager
         this.lastPlayerMoveDirection = Point.Zero;
         this.lastPathBuildTimeMs = 0;
         this.lastTargetTile = null;
+        this.pauseFollowUntilWarp = false;
         this.movementService.Reset();
         this.warpCoordinator.ResetRetryState();
     }
@@ -102,6 +104,7 @@ internal sealed class HorseFollowManager
     {
         this.Reset();
         this.SyncTrackedHorse();
+        this.RefreshLocationFollowPauseState();
     }
 
     // ----------------------------
@@ -114,7 +117,13 @@ internal sealed class HorseFollowManager
             return;
         }
 
-        this.SyncTrackedHorse();
+        this.RefreshLocationFollowPauseState();
+
+        if (this.trackedHorse is not null && !this.IsTrackedHorseStillValid())
+        {
+            this.ClearTrackedHorse();
+        }
+
         this.lastPlayerTile = Game1.player.TilePoint;
         this.lastPlayerMoveDirection = Point.Zero;
         this.InvalidatePath();
@@ -128,6 +137,17 @@ internal sealed class HorseFollowManager
         if (this.trackedHorse is null)
         {
             this.state = FollowState.Idle;
+            return;
+        }
+
+        // ----------------------------
+        // 屋内ではワープも追従も開始しない
+        // ----------------------------
+        if (this.pauseFollowUntilWarp)
+        {
+            this.warpCoordinator.ResetRetryState();
+            this.state = FollowState.Paused;
+            this.StopHorse(this.trackedHorse);
             return;
         }
 
@@ -164,7 +184,19 @@ internal sealed class HorseFollowManager
         }
 
         this.ProcessToggleKey();
-        this.SyncTrackedHorse();
+
+        // ----------------------------
+        // 騎乗中はその馬を追跡対象にする
+        // ----------------------------
+        if (Game1.player.mount is Horse mountedHorse)
+        {
+            this.TrackHorse(mountedHorse);
+        }
+        else if (this.trackedHorse is not null && !this.IsTrackedHorseStillValid())
+        {
+            this.ClearTrackedHorse();
+        }
+
         this.UpdatePlayerMovementStamp();
 
         if (Game1.player.isRidingHorse())
@@ -177,9 +209,13 @@ internal sealed class HorseFollowManager
         {
             this.wasMountedLastTick = false;
             this.SyncHorseFacingAfterDismount();
-            if (this.followEnabled)
+            if (this.followEnabled && !this.pauseFollowUntilWarp)
             {
                 this.EnterFollowPending();
+            }
+            else if (this.pauseFollowUntilWarp)
+            {
+                this.state = FollowState.Paused;
             }
             else
             {
@@ -193,14 +229,38 @@ internal sealed class HorseFollowManager
             return;
         }
 
+        // ----------------------------
+        // 屋内など追従停止中のロケーションでは
+        // ワープ処理も経路確認も行わない
+        // ----------------------------
+        if (this.pauseFollowUntilWarp)
+        {
+            this.warpCoordinator.ResetRetryState();
+
+            if (this.state != FollowState.Paused || !this.movementService.HasNoPath())
+            {
+                this.InvalidatePath();
+                this.StopHorse(this.trackedHorse);
+            }
+
+            this.state = FollowState.Paused;
+            return;
+        }
+
         this.ApplyCollisionPreferences(this.trackedHorse);
         this.UpdateHorseMovementStamp();
 
         if (!this.followEnabled)
         {
             this.warpCoordinator.ResetRetryState();
+
+            if (this.state != FollowState.Idle || !this.movementService.HasNoPath())
+            {
+                this.InvalidatePath();
+                this.StopHorse(this.trackedHorse);
+            }
+
             this.state = FollowState.Idle;
-            this.StopHorse(this.trackedHorse);
             return;
         }
 
@@ -224,8 +284,13 @@ internal sealed class HorseFollowManager
 
         if (Game1.activeClickableMenu is not null || Game1.eventUp || !Game1.player.canMove)
         {
+            if (this.state != FollowState.Paused || !this.movementService.HasNoPath())
+            {
+                this.InvalidatePath();
+                this.StopHorse(this.trackedHorse);
+            }
+
             this.state = FollowState.Paused;
-            this.StopHorse(this.trackedHorse);
             return;
         }
 
@@ -333,6 +398,18 @@ internal sealed class HorseFollowManager
         if (this.followEnabled)
         {
             this.ShowMessage("message.follow_enabled");
+
+            if (this.pauseFollowUntilWarp)
+            {
+                this.state = FollowState.Paused;
+                if (this.trackedHorse is not null)
+                {
+                    this.StopHorse(this.trackedHorse);
+                }
+
+                return;
+            }
+
             if (!Game1.player.isRidingHorse())
             {
                 this.EnterFollowPending();
@@ -389,6 +466,12 @@ internal sealed class HorseFollowManager
     // ----------------------------
     private bool TryWarpHorseToPlayer()
     {
+        if (this.pauseFollowUntilWarp)
+        {
+            this.warpCoordinator.ResetRetryState();
+            return false;
+        }
+
         if (this.trackedHorse is null || !this.getConfig().EnableWarpFollow)
         {
             this.warpCoordinator.ResetRetryState();
@@ -406,7 +489,7 @@ internal sealed class HorseFollowManager
     }
 
     // ----------------------------
-    // 対象の馬を同期する
+    // 対象の馬を同期する(初回ロード時のみ実行)
     // ----------------------------
     private void SyncTrackedHorse()
     {
@@ -421,6 +504,41 @@ internal sealed class HorseFollowManager
         {
             this.TrackHorse(ownedHorse);
         }
+    }
+
+    // ----------------------------
+    // 追跡中の馬がまだ有効に存在しているか確認する
+    // ----------------------------
+    private bool IsTrackedHorseStillValid()
+    {
+        if (this.trackedHorse is null)
+        {
+            return false;
+        }
+
+        if (Game1.player.mount is Horse mountedHorse)
+        {
+            return ReferenceEquals(this.trackedHorse, mountedHorse);
+        }
+
+        GameLocation? location = this.trackedHorse.currentLocation;
+        if (location is null)
+        {
+            return false;
+        }
+
+        return location.characters.Contains(this.trackedHorse);
+    }
+
+    // ----------------------------
+    // 追跡中の馬情報をクリアする
+    // ----------------------------
+    private void ClearTrackedHorse()
+    {
+        this.trackedHorse = null;
+        this.state = FollowState.Idle;
+        this.InvalidatePath();
+        this.warpCoordinator.ResetRetryState();
     }
 
     // ----------------------------
@@ -539,6 +657,28 @@ internal sealed class HorseFollowManager
         this.movementService.SetPath(path);
         this.lastPathBuildTimeMs = nowMs;
         this.lastTargetTile = targetTile;
+    }
+
+    // ----------------------------
+    // 現在ロケーションで追従を停止するか更新する
+    // ----------------------------
+    private void RefreshLocationFollowPauseState()
+    {
+        GameLocation? currentLocation = Game1.player.currentLocation;
+        this.pauseFollowUntilWarp = currentLocation is null || !currentLocation.IsOutdoors;
+
+        if (!this.pauseFollowUntilWarp)
+        {
+            return;
+        }
+
+        this.warpCoordinator.ResetRetryState();
+        this.InvalidatePath();
+
+        if (this.trackedHorse is not null)
+        {
+            this.StopHorse(this.trackedHorse);
+        }
     }
 
     // ----------------------------
