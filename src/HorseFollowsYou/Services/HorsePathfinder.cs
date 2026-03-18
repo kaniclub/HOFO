@@ -25,8 +25,10 @@ internal sealed class HorsePathfinder
     // ----------------------------
     // 経路を探索する
     // ----------------------------
-    public List<Point>? BuildPath(GameLocation location, Horse horse, Point start, Point goal)
+    public List<Point>? BuildPath(GameLocation location, Horse horse, Point start, Point goal, out int expanded)
     {
+        expanded = 0;
+
         if (start == goal)
         {
             return new List<Point>();
@@ -37,7 +39,6 @@ internal sealed class HorsePathfinder
         open.Enqueue(start);
         cameFrom[start] = null;
 
-        int expanded = 0;
         const int maxExpanded = 2500;
 
         while (open.Count > 0 && expanded < maxExpanded)

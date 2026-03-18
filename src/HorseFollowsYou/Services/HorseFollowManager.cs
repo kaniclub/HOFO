@@ -30,6 +30,7 @@ internal sealed class HorseFollowManager
 
     private readonly ITranslationHelper translation;
     private readonly System.Func<ModConfig> getConfig;
+    private readonly IMonitor monitor;
     private readonly HorseWarpCoordinator warpCoordinator;
     private readonly HorseFollowTargetResolver targetResolver;
     private readonly HorsePathfinder pathfinder;
@@ -46,12 +47,29 @@ internal sealed class HorseFollowManager
     private Point? lastTargetTile;
 
     // ----------------------------
+    // デバッグ描画用に現在の経路を返す
+    // ----------------------------
+    public IReadOnlyList<Point>? GetDebugPath()
+    {
+        return this.movementService.GetCurrentPathForDebug();
+    }
+
+    // ----------------------------
+    // デバッグ描画用に目標タイルを返す
+    // ----------------------------
+    public Point? GetDebugTargetTile()
+    {
+        return this.lastTargetTile;
+    }
+
+    // ----------------------------
     // 管理クラスを初期化する
     // ----------------------------
     public HorseFollowManager(ITranslationHelper translation, System.Func<ModConfig> getConfig, IMonitor monitor)
     {
         this.translation = translation;
         this.getConfig = getConfig;
+        this.monitor = monitor;
         this.warpCoordinator = new HorseWarpCoordinator(getConfig, monitor);
         this.targetResolver = new HorseFollowTargetResolver(getConfig);
         this.pathfinder = new HorsePathfinder(this.targetResolver);
@@ -224,6 +242,7 @@ internal sealed class HorseFollowManager
         Point? targetTile = this.ResolveFollowTargetTile(this.trackedHorse, Game1.player);
         if (targetTile is null)
         {
+            this.DebugLog($"[PathDebug] target_not_found horse={this.trackedHorse.TilePoint} player={Game1.player.TilePoint} state={this.state}");
             this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
             return;
@@ -501,17 +520,35 @@ internal sealed class HorseFollowManager
             return;
         }
 
-        List<Point>? path = this.pathfinder.BuildPath(this.trackedHorse.currentLocation, this.trackedHorse, this.trackedHorse.TilePoint, targetTile);
+        Point startTile = this.trackedHorse.TilePoint;
+        this.DebugLog($"[PathDebug] rebuild_start start={startTile} goal={targetTile}");
+
+        List<Point>? path = this.pathfinder.BuildPath(this.trackedHorse.currentLocation, this.trackedHorse, startTile, targetTile, out int expanded);
         if (path is null || path.Count == 0)
         {
+            this.DebugLog($"[PathDebug] rebuild_failed start={startTile} goal={targetTile} expanded={expanded}");
             this.movementService.SetPath(null);
             this.lastPathBuildTimeMs = nowMs;
             return;
         }
 
+        this.DebugLog($"[PathDebug] rebuild_success start={startTile} goal={targetTile} nodes={path.Count} expanded={expanded}");
         this.movementService.SetPath(path);
         this.lastPathBuildTimeMs = nowMs;
         this.lastTargetTile = targetTile;
+    }
+
+    // ----------------------------
+    // デバッグログを出力する
+    // ----------------------------
+    private void DebugLog(string message)
+    {
+        if (!this.getConfig().DebugMode)
+        {
+            return;
+        }
+
+        this.monitor.Log(message, LogLevel.Debug);
     }
 
     // ----------------------------

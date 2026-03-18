@@ -76,6 +76,14 @@ internal sealed class HorseMovementService
     }
 
     // ----------------------------
+    // デバッグ描画用に現在の経路を返す
+    // ----------------------------
+    public IReadOnlyList<Point>? GetCurrentPathForDebug()
+    {
+        return this.currentPath;
+    }
+
+    // ----------------------------
     // 経路を設定する
     // ----------------------------
     public void SetPath(List<Point>? path)

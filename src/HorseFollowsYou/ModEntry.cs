@@ -1,9 +1,12 @@
 using System.Reflection;
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
 using HorseFollowsYou.Integrations;
 using HorseFollowsYou.Services;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Utilities;
+using StardewValley;
 
 namespace HorseFollowsYou;
 
@@ -30,6 +33,7 @@ public sealed class ModEntry : Mod
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
         helper.Events.GameLoop.ReturnedToTitle += this.OnReturnedToTitle;
         helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
+        helper.Events.Display.RenderedWorld += this.OnRenderedWorld;
         helper.Events.Player.Warped += this.OnWarped;
     }
 
@@ -72,6 +76,38 @@ public sealed class ModEntry : Mod
     }
 
     // ----------------------------
+    // デバッグ表示を描画する
+    // ----------------------------
+    private void OnRenderedWorld(object? sender, RenderedWorldEventArgs e)
+    {
+        if (this.followManager is null || !Context.IsWorldReady || !this.config.DebugMode)
+        {
+            return;
+        }
+
+        IReadOnlyList<Point>? path = this.followManager.GetDebugPath();
+        Point? targetTile = this.followManager.GetDebugTargetTile();
+
+        if (path is null && targetTile is null)
+        {
+            return;
+        }
+
+        if (path is not null)
+        {
+            foreach (Point tile in path)
+            {
+                this.DrawDebugTile(e.SpriteBatch, tile, Color.Red * 0.22f);
+            }
+        }
+
+        if (targetTile is Point goal)
+        {
+            this.DrawDebugTile(e.SpriteBatch, goal, Color.Black * 0.28f);
+        }
+    }
+
+    // ----------------------------
     // 画面移動時の処理を呼ぶ
     // ----------------------------
     private void OnWarped(object? sender, WarpedEventArgs e)
@@ -82,6 +118,16 @@ public sealed class ModEntry : Mod
         }
 
         this.followManager?.OnWarped();
+    }
+
+    // ----------------------------
+    // デバッグ用の色付きタイルを描画する
+    // ----------------------------
+    private void DrawDebugTile(SpriteBatch spriteBatch, Point tile, Color color)
+    {
+        Vector2 pixelPosition = Game1.GlobalToLocal(Game1.viewport, new Vector2(tile.X * 64f, tile.Y * 64f));
+        Rectangle destination = new((int)pixelPosition.X, (int)pixelPosition.Y, 64, 64);
+        spriteBatch.Draw(Game1.staminaRect, destination, color);
     }
 
     // ----------------------------
