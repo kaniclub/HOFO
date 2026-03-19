@@ -1,8 +1,10 @@
 {
   "config.enabled.name": "Mod有効",
   "config.enabled.description": "HorseFollowsYou 全体の有効 / 無効を切り替えます。",
-  "config.warp_follow.name": "マップ跨ぎ同行",
+  "config.warp_follow.name": "マップまたぎ同行",
   "config.warp_follow.description": "バニラで馬移動が許可される場所だけ、マップをまたいで同行します。",
+  "config.follow_on_load.name": "ロード時の同行ON",
+  "config.follow_on_load.description": "セーブデータ読込時に同行をONで開始します。",
   "config.hud_messages.name": "HUDメッセージ",
   "config.hud_messages.description": "同行の開始 / 停止を短いメッセージで表示します。",
   "config.toggle_key.name": "同行トグルキー",
@@ -24,5 +26,17 @@
   "config.ignore_player_collision.name": "プレイヤー貫通",
   "config.ignore_player_collision.description": "馬とプレイヤーの衝突を無くします。",
   "message.follow_enabled": "馬の同行をONにしました",
-  "message.follow_disabled": "馬の同行をOFFにしました"
+  "message.follow_disabled": "馬の同行をOFFにしました",
+  "config.auto_enable_follow.name": "騎乗/フルートで同行ON",
+  "config.auto_enable_follow.description": "馬に騎乗した時やホースフルートで呼んだ時に、同行を自動でONにします。",
+  "config.warp_effects_and_sound.name": "ワープ演出とサウンド",
+  "config.warp_effects_and_sound.description": "Modによる馬ワープ時のエフェクトとサウンドを再生します。",
+  "config.path_abort_distance.name": "経路探索を打ち切る距離",
+  "config.path_abort_distance.description": "馬の移動距離がこの値以上なら打ち切り処理へ移ります。0で無効です。",
+  "config.path_failure_action.name": "打ち切り / 経路なし時の処理",
+  "config.path_failure_action.description": "経路が2回連続で見つからない時、または打ち切り距離に達した時の処理です。",
+  "config.path_failure_action.wait": "待機",
+  "config.path_failure_action.warp": "近くにワープ",
+  "config.path_failure_action.turn_off": "同行OFF",
+  "config.path_failure_action.do_not_move": "移動しない"
 }

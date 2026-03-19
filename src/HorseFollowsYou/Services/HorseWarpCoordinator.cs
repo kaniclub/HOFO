@@ -59,7 +59,7 @@ internal sealed class HorseWarpCoordinator
     // ----------------------------
     // プレイヤー近くへ馬をワープさせる
     // ----------------------------
-    public WarpAttemptResult TryWarpHorseNearPlayer(Horse horse, Farmer player)
+    public WarpAttemptResult TryWarpHorseNearPlayer(Horse horse, Farmer player, bool playSummonEffects = false)
     {
         string fromLocation = horse.currentLocation.NameOrUniqueName;
         string toLocation = player.currentLocation.NameOrUniqueName;
@@ -123,11 +123,19 @@ internal sealed class HorseWarpCoordinator
             return WarpAttemptResult.RetryLater;
         }
 
+        GameLocation fromLocationRef = horse.currentLocation;
+        Point horseTileBeforeWarp = horse.TilePoint;
+
         Game1.warpCharacter(horse, player.currentLocation, openTile);
         horse.Halt();
         horse.controller = null;
 
         Point horseTileAfter = horse.TilePoint;
+
+        if (playSummonEffects)
+        {
+            this.PlayHorseFluteWarpEffects(fromLocationRef, horseTileBeforeWarp, player.currentLocation, horseTileAfter);
+        }
         int manhattanDistance = this.GetManhattanDistance(playerTile, horseTileAfter);
 
         this.ClearRetryBlock();
@@ -230,32 +238,16 @@ internal sealed class HorseWarpCoordinator
 
     // ----------------------------
     // プレイヤー周囲の空きタイルを探す
-    // - 半径1〜8は正面1列と後方1列を除外
-    // - 半径9〜12は正面1列と後方1列も許可
     // ----------------------------
     private Vector2 FindOpenTileAroundPlayer(Horse horse, Farmer player)
     {
-        Vector2 nearTile = this.FindOpenTileInRings(
-            horse,
-            player,
-            minRadius: 1,
-            maxRadius: 8,
-            includeFrontLine: false,
-            includeBackLine: false
-        );
-
-        if (nearTile != Vector2.Zero)
-        {
-            return nearTile;
-        }
-
         return this.FindOpenTileInRings(
             horse,
             player,
-            minRadius: 9,
+            minRadius: 2,
             maxRadius: 12,
-            includeFrontLine: true,
-            includeBackLine: true
+            includeFrontLine: false,
+            includeBackLine: false
         );
     }
 
@@ -360,7 +352,7 @@ internal sealed class HorseWarpCoordinator
         return !location.isCollidingPosition(
             boundingBox,
             Game1.viewport,
-            horse is Farmer,
+            false,
             0,
             glider: false,
             horse,
@@ -371,7 +363,78 @@ internal sealed class HorseWarpCoordinator
         );
     }
 
+
     // ----------------------------
+    // SEとエフェクトを再生する
+    // ----------------------------
+    private void PlayHorseFluteWarpEffects(GameLocation fromLocation, Point fromTile, GameLocation toLocation, Point toTile)
+    {
+        if (!this.getConfig().EnableWarpEffectsAndSound)
+        {
+            return;
+        }
+
+        this.AddHorseFlutePuffs(fromLocation, fromTile);
+        fromLocation.playSound("wand", new Vector2(fromTile.X, fromTile.Y));
+
+        toLocation.playSound("wand", new Vector2(toTile.X, toTile.Y));
+        this.AddHorseFlutePuffs(toLocation, toTile);
+        this.AddHorseFluteArrivalTrail(toLocation, toTile);
+    }
+
+    // ----------------------------
+    // 風の煙エフェクトを追加する
+    // ----------------------------
+    private void AddHorseFlutePuffs(GameLocation location, Point centerTile)
+    {
+        for (int i = 0; i < 8; i++)
+        {
+            TemporaryAnimatedSprite sprite = new(
+                10,
+                new Vector2(centerTile.X + Utility.RandomFloat(-1f, 1f), centerTile.Y + Utility.RandomFloat(-1f, 0f)) * 64f,
+                Color.White,
+                8,
+                flipped: false,
+                50f
+            )
+            {
+                layerDepth = 1f,
+                motion = new Vector2(Utility.RandomFloat(-0.5f, 0.5f), Utility.RandomFloat(-0.5f, 0.5f)),
+            };
+
+            location.temporarySprites.Add(sprite);
+        }
+    }
+
+    // ----------------------------
+    //着地ラインを追加する
+    // ----------------------------
+    private void AddHorseFluteArrivalTrail(GameLocation location, Point centerTile)
+    {
+        int delayStep = 0;
+
+        for (int x = centerTile.X + 3; x >= centerTile.X - 3; x--)
+        {
+            TemporaryAnimatedSprite sprite = new(
+                6,
+                new Vector2(x, centerTile.Y) * 64f,
+                Color.White,
+                8,
+                flipped: false,
+                50f
+            )
+            {
+                layerDepth = 1f,
+                delayBeforeAnimationStart = delayStep * 25,
+                motion = new Vector2(-0.25f, 0f),
+            };
+
+            location.temporarySprites.Add(sprite);
+            delayStep++;
+        }
+    }
+
+// ----------------------------
     // デバッグログを出す
     // ----------------------------
     private void DebugLog(string message)

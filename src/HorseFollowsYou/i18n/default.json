@@ -3,6 +3,8 @@
   "config.enabled.description": "Enable or disable HorseFollowsYou.",
   "config.warp_follow.name": "Cross-Map Companion",
   "config.warp_follow.description": "Your horse will accompany you across maps only where vanilla horse movement is allowed.",
+  "config.follow_on_load.name": "Follow ON on Load",
+  "config.follow_on_load.description": "Start companion mode as ON when a save is loaded.",
   "config.hud_messages.name": "HUD Messages",
   "config.hud_messages.description": "Show short messages when horse companion mode is turned on or off.",
   "config.toggle_key.name": "Companion Toggle Key",
@@ -24,5 +26,17 @@
   "config.ignore_player_collision.name": "Ignore Player Collision",
   "config.ignore_player_collision.description": "Disable collision between the horse and the player.",
   "message.follow_enabled": "Horse companion mode turned ON.",
-  "message.follow_disabled": "Horse companion mode turned OFF."
+  "message.follow_disabled": "Horse companion mode turned OFF.",
+  "config.auto_enable_follow.name": "Enable Follow on Mount / Flute",
+  "config.auto_enable_follow.description": "Automatically enable companion mode when you mount your horse or summon it with the Horse Flute.",
+  "config.warp_effects_and_sound.name": "Warp Effects and Sound",
+  "config.warp_effects_and_sound.description": "Play visual effects and sound when this mod warps your horse.",
+  "config.path_abort_distance.name": "Pathfinding Abort Distance",
+  "config.path_abort_distance.description": "If your horse's travel distance reaches this value, follow handling will switch to the abort behavior. Set to 0 to disable.",
+  "config.path_failure_action.name": "Action on Abort / No Path",
+  "config.path_failure_action.description": "What to do when no path is found twice in a row, or when the abort distance is reached.",
+  "config.path_failure_action.wait": "Wait",
+  "config.path_failure_action.warp": "Warp Nearby",
+  "config.path_failure_action.turn_off": "Turn Follow Off",
+  "config.path_failure_action.do_not_move": "Do Not Move"
 }

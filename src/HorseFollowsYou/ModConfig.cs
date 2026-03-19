@@ -15,6 +15,21 @@ internal sealed class ModConfig
     public bool EnableWarpFollow { get; set; } = true;
 
     // ----------------------------
+    // ロード時の同行状態
+    // ----------------------------
+    public bool EnableFollowOnLoad { get; set; } = true;
+
+    // ----------------------------
+    // ホースフルートや騎乗時に同行を自動で ON にする
+    // ----------------------------
+    public bool AutoEnableFollowOnMountOrFlute { get; set; } = false;
+
+    // ----------------------------
+    // ワープ時のエフェクト / サウンド
+    // ----------------------------
+    public bool EnableWarpEffectsAndSound { get; set; } = true;
+
+    // ----------------------------
     // HUD メッセージ表示
     // ----------------------------
     public bool EnableHudMessages { get; set; } = true;
@@ -34,6 +49,21 @@ internal sealed class ModConfig
     // 停止距離（タイル）
     // ----------------------------
     public float StopDistance { get; set; } = 2.0f;
+
+    // ----------------------------
+    // 経路探索を打ち切る距離（マンハッタン距離）
+    // - 0 なら無効
+    // ----------------------------
+    public int PathAbortDistance { get; set; } = 0;
+
+    // ----------------------------
+    // 経路が見つからない / 打ち切った時の処理
+    // 0: 待機
+    // 1: 近くにワープ
+    // 2: 同行をOFF
+    // 3: 移動しない
+    // ----------------------------
+    public int PathFailureAction { get; set; } = 0;
 
     // ----------------------------
     // 降馬後に追従開始を待つ時間（ミリ秒）

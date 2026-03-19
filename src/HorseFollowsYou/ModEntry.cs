@@ -20,6 +20,7 @@ public sealed class ModEntry : Mod
 {
     private ModConfig config = new();
     private HorseFollowManager? followManager;
+    private bool horseWarpEventSubscribed;
 
     // ----------------------------
     // Mod 起動時の初期化を行う
@@ -56,6 +57,7 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
+        this.SubscribeHorseWarpEvent();
         this.followManager?.OnSaveLoaded();
     }
 
@@ -64,6 +66,7 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
     {
+        this.UnsubscribeHorseWarpEvent();
         this.followManager?.Reset();
     }
 
@@ -120,6 +123,49 @@ public sealed class ModEntry : Mod
         this.followManager?.OnWarped();
     }
 
+
+    // ----------------------------
+    // フルートによるワープ要求イベントを購読する
+    // ----------------------------
+    private void SubscribeHorseWarpEvent()
+    {
+        if (!Context.IsWorldReady || Game1.player?.team is null || this.horseWarpEventSubscribed)
+        {
+            return;
+        }
+
+        Game1.player.team.requestHorseWarpEvent.onEvent += this.OnHorseWarpRequested;
+        this.horseWarpEventSubscribed = true;
+    }
+
+    // ----------------------------
+    // フルートによるワープ要求イベント購読を解除する
+    // ----------------------------
+    private void UnsubscribeHorseWarpEvent()
+    {
+        if (!this.horseWarpEventSubscribed || Game1.player?.team is null)
+        {
+            this.horseWarpEventSubscribed = false;
+            return;
+        }
+
+        Game1.player.team.requestHorseWarpEvent.onEvent -= this.OnHorseWarpRequested;
+        this.horseWarpEventSubscribed = false;
+    }
+
+    // ----------------------------
+    // フルートによる馬ワープ要求を受け取る
+    // ----------------------------
+    private void OnHorseWarpRequested(long uid)
+    {
+        if (!Context.IsWorldReady || Game1.player is null || uid != Game1.player.UniqueMultiplayerID)
+        {
+            return;
+        }
+
+        this.followManager?.OnHorseFluteWarpRequested();
+    }
+
     // ----------------------------
     // デバッグ用の色付きタイルを描画する
     // ----------------------------
@@ -143,6 +189,8 @@ public sealed class ModEntry : Mod
         // 数値が壊れていたときだけ安全な範囲へ戻す
         config.FollowStartDistance = System.Math.Clamp(config.FollowStartDistance, 1.0f, 8.0f);
         config.StopDistance = System.Math.Clamp(config.StopDistance, 0.5f, 4.0f);
+        config.PathAbortDistance = System.Math.Clamp(config.PathAbortDistance, 0, 99);
+        config.PathFailureAction = System.Math.Clamp(config.PathFailureAction, 0, 3);
         config.DismountDelayMilliseconds = System.Math.Max(0, config.DismountDelayMilliseconds);
         config.PathRebuildSeconds = System.Math.Clamp(config.PathRebuildSeconds, 0.25f, 5.0f);
         config.NearSpeedMultiplier = System.Math.Clamp(config.NearSpeedMultiplier, 0.25f, 6.0f);
