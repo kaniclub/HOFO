@@ -38,5 +38,10 @@
   "config.path_failure_action.wait": "Wait",
   "config.path_failure_action.warp": "Warp Nearby",
   "config.path_failure_action.turn_off": "Turn Follow Off",
-  "config.path_failure_action.do_not_move": "Do Not Move"
+  "config.path_failure_action.do_not_move": "Do Not Move",
+  "config.disabled_mounts.title": "Mounts excluded from follow tracking",
+  "config.disabled_mounts.description": "Checked mounts will no longer become the active follow target when you ride them.",
+  "config.disabled_mounts.helper": "Only the checked mounts are excluded from follow tracking.",
+  "config.disabled_mounts.entry_tooltip": "Check this to exclude the mount from follow tracking.",
+  "config.disabled_mounts.empty": "No horse-like mounts are currently available. This list refreshes after loading a save and at the start of each day."
 }

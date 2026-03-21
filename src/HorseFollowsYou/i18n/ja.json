@@ -38,5 +38,10 @@
   "config.path_failure_action.wait": "待機",
   "config.path_failure_action.warp": "近くにワープ",
   "config.path_failure_action.turn_off": "同行OFF",
-  "config.path_failure_action.do_not_move": "移動しない"
+  "config.path_failure_action.do_not_move": "移動しない",
+  "config.disabled_mounts.title": "同行設定の対象外にする馬",
+  "config.disabled_mounts.description": "ここでチェックした馬は、最後に乗っても同行設定の対象になりません。",
+  "config.disabled_mounts.helper": "チェックを入れた馬だけ、同行設定の対象外になります。",
+  "config.disabled_mounts.entry_tooltip": "チェックすると、この馬は同行設定の対象外になります。",
+  "config.disabled_mounts.empty": "現在ワールド内に馬系の対象が見つかりません。セーブデータ読込後と毎朝、一覧を更新します。"
 }

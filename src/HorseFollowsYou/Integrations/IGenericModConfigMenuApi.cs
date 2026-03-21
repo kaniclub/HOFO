@@ -11,6 +11,17 @@ public interface IGenericModConfigMenuApi
 {
     void Register(IManifest mod, Action reset, Action save, bool titleScreenOnly = false);
 
+    void Unregister(IManifest mod);
+
+    void AddSectionTitle(
+        IManifest mod,
+        Func<string> text,
+        Func<string>? tooltip = null);
+
+    void AddParagraph(
+        IManifest mod,
+        Func<string> text);
+
     void AddBoolOption(
         IManifest mod,
         Func<bool> getValue,
@@ -42,7 +53,6 @@ public interface IGenericModConfigMenuApi
         float? interval = null,
         Func<float, string>? formatValue = null,
         string? fieldId = null);
-
 
     void AddTextOption(
         IManifest mod,

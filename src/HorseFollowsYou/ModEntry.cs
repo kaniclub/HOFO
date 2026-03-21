@@ -7,6 +7,7 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Utilities;
 using StardewValley;
+using StardewValley.Characters;
 
 namespace HorseFollowsYou;
 
@@ -18,8 +19,14 @@ namespace HorseFollowsYou;
 // ----------------------------
 public sealed class ModEntry : Mod
 {
+    private const string SaveDataKey = "follow-mount-settings";
+
     private ModConfig config = new();
+    private FollowMountSaveData saveData = new();
     private HorseFollowManager? followManager;
+    private HorseMountRegistry mountRegistry = null!;
+    private GmcmIntegration? gmcmIntegration;
+    private IReadOnlyList<HorseMountOption> cachedMountOptions = Array.Empty<HorseMountOption>();
     private bool horseWarpEventSubscribed;
 
     // ----------------------------
@@ -28,10 +35,19 @@ public sealed class ModEntry : Mod
     public override void Entry(IModHelper helper)
     {
         this.config = this.NormalizeConfig(helper.ReadConfig<ModConfig>());
-        this.followManager = new HorseFollowManager(helper.Translation, () => this.config, this.Monitor);
+        this.saveData = new FollowMountSaveData();
+        this.mountRegistry = new HorseMountRegistry();
+        this.followManager = new HorseFollowManager(
+            helper.Translation,
+            () => this.config,
+            this.Monitor,
+            this.IsHorseDisabled,
+            this.GetDefaultTrackedHorse
+        );
 
         helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
         helper.Events.GameLoop.SaveLoaded += this.OnSaveLoaded;
+        helper.Events.GameLoop.DayStarted += this.OnDayStarted;
         helper.Events.GameLoop.ReturnedToTitle += this.OnReturnedToTitle;
         helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
         helper.Events.Display.RenderedWorld += this.OnRenderedWorld;
@@ -43,13 +59,19 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
     {
-        new GmcmIntegration(
+        this.gmcmIntegration = new GmcmIntegration(
             this.Helper,
             this.ModManifest,
             this.Helper.Translation,
             () => this.config,
-            value => this.config = this.NormalizeConfig(value)
-        ).Register();
+            value => this.config = this.NormalizeConfig(value),
+            () => this.cachedMountOptions,
+            this.IsHorseDisabled,
+            this.SetHorseDisabled,
+            this.ResetAllSettings,
+            this.SaveAllSettings
+        );
+        this.gmcmIntegration.RegisterOrReload();
     }
 
     // ----------------------------
@@ -57,8 +79,22 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
+        this.LoadSaveData();
+        this.RefreshMountOptions();
+        this.gmcmIntegration?.RegisterOrReload();
+
         this.SubscribeHorseWarpEvent();
         this.followManager?.OnSaveLoaded();
+    }
+
+    // ----------------------------
+    // 毎朝一覧更新を行う
+    // ----------------------------
+    private void OnDayStarted(object? sender, DayStartedEventArgs e)
+    {
+        this.RefreshMountOptions();
+        this.gmcmIntegration?.RegisterOrReload();
+        this.followManager?.OnMountFilterChanged();
     }
 
     // ----------------------------
@@ -67,6 +103,9 @@ public sealed class ModEntry : Mod
     private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
     {
         this.UnsubscribeHorseWarpEvent();
+        this.saveData = new FollowMountSaveData();
+        this.cachedMountOptions = Array.Empty<HorseMountOption>();
+        this.gmcmIntegration?.RegisterOrReload();
         this.followManager?.Reset();
     }
 
@@ -123,7 +162,6 @@ public sealed class ModEntry : Mod
         this.followManager?.OnWarped();
     }
 
-
     // ----------------------------
     // フルートによるワープ要求イベントを購読する
     // ----------------------------
@@ -177,6 +215,118 @@ public sealed class ModEntry : Mod
     }
 
     // ----------------------------
+    // セーブデータを読み込む
+    // ----------------------------
+    private void LoadSaveData()
+    {
+        FollowMountSaveData? loaded = this.Helper.Data.ReadSaveData<FollowMountSaveData>(SaveDataKey);
+        this.saveData = this.NormalizeSaveData(loaded);
+    }
+
+    // ----------------------------
+    // セーブデータを保存する
+    // ----------------------------
+    private void SaveSaveData()
+    {
+        if (!Context.IsWorldReady)
+        {
+            return;
+        }
+
+        this.Helper.Data.WriteSaveData(SaveDataKey, this.NormalizeSaveData(this.saveData));
+    }
+
+    // ----------------------------
+    // GMCM からの全設定保存を行う
+    // ----------------------------
+    private void SaveAllSettings()
+    {
+        this.config = this.NormalizeConfig(this.config);
+        this.saveData = this.NormalizeSaveData(this.saveData);
+
+        this.Helper.WriteConfig(this.config);
+        this.SaveSaveData();
+        this.RefreshMountOptions();
+        this.followManager?.OnMountFilterChanged();
+    }
+
+    // ----------------------------
+    // GMCM からの全設定リセットを行う
+    // ----------------------------
+    private void ResetAllSettings()
+    {
+        this.config = this.NormalizeConfig(new ModConfig());
+        this.saveData = new FollowMountSaveData();
+        this.RefreshMountOptions();
+        this.followManager?.OnMountFilterChanged();
+    }
+
+    // ----------------------------
+    // ワールド内の馬一覧を更新する
+    // ----------------------------
+    private void RefreshMountOptions()
+    {
+        this.cachedMountOptions = this.mountRegistry.GetMountOptions();
+    }
+
+    // ----------------------------
+    // 同行対象外か判定する
+    // ----------------------------
+    private bool IsHorseDisabled(string horseId)
+    {
+        string normalizedHorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId);
+        return this.saveData.DisabledHorseIds.Any(savedId => string.Equals(
+            HorseMountRegistry.NormalizeHorseIdKey(savedId),
+            normalizedHorseId,
+            StringComparison.OrdinalIgnoreCase
+        ));
+    }
+
+    // ----------------------------
+    // 同行対象外設定を切り替える
+    // ----------------------------
+    private void SetHorseDisabled(string horseId, bool disabled)
+    {
+        string normalizedHorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId);
+
+        this.saveData.DisabledHorseIds = this.saveData.DisabledHorseIds
+            .Where(savedId => !string.Equals(
+                HorseMountRegistry.NormalizeHorseIdKey(savedId),
+                normalizedHorseId,
+                StringComparison.OrdinalIgnoreCase
+            ))
+            .ToList();
+
+        if (disabled)
+        {
+            this.saveData.DisabledHorseIds.Add(normalizedHorseId);
+        }
+    }
+
+    // ----------------------------
+    // 初回同期用の馬を返す
+    // ----------------------------
+    private Horse? GetDefaultTrackedHorse()
+    {
+        return this.mountRegistry.FindFirstEligibleHorse(this.IsHorseDisabled);
+    }
+
+    // ----------------------------
+    // セーブデータの内容を補正する
+    // ----------------------------
+    private FollowMountSaveData NormalizeSaveData(FollowMountSaveData? saveData)
+    {
+        saveData ??= new FollowMountSaveData();
+        saveData.DisabledHorseIds = (saveData.DisabledHorseIds ?? new List<string>())
+            .Where(static horseId => !string.IsNullOrWhiteSpace(horseId))
+            .Select(HorseMountRegistry.NormalizeHorseIdKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static horseId => horseId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return saveData;
+    }
+
+    // ----------------------------
     // 設定値を補正する
     // ----------------------------
     private ModConfig NormalizeConfig(ModConfig? config)
@@ -199,6 +349,7 @@ public sealed class ModEntry : Mod
 
         return config;
     }
+
     // ----------------------------
     // キーバインドが未設定なら初期値を補う
     // ----------------------------
@@ -215,11 +366,6 @@ public sealed class ModEntry : Mod
             return parsed;
         }
 
-        if (Activator.CreateInstance(typeof(KeybindList), nonPublic: true) is KeybindList created)
-        {
-            return created;
-        }
-
-        throw new System.InvalidOperationException("Unable to create a KeybindList.");
+        return KeybindList.Parse(fallback);
     }
 }
