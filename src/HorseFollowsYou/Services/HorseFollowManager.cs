@@ -386,7 +386,7 @@ internal sealed class HorseFollowManager
         }
 
         float playerDistance = Vector2.Distance(this.trackedHorse.Tile, Game1.player.Tile);
-        if (playerDistance <= this.getConfig().StopDistance)
+        if (playerDistance <= this.getConfig().StopDistance && !this.HasActivePath())
         {
             this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
@@ -431,7 +431,7 @@ internal sealed class HorseFollowManager
         this.lastTargetTile = targetTile;
 
         float targetDistance = Vector2.Distance(this.trackedHorse.Tile, new Vector2(targetTile.Value.X, targetTile.Value.Y));
-        if (targetDistance <= this.getConfig().StopDistance)
+        if (targetDistance <= this.getConfig().StopDistance && !this.HasActivePath())
         {
             this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
@@ -501,6 +501,14 @@ internal sealed class HorseFollowManager
             this.HandleNoPathFailure();
             return;
         }
+    }
+
+    // ----------------------------
+    // まだ移動中の経路が残っているかを返す
+    // ----------------------------
+    private bool HasActivePath()
+    {
+        return !this.movementService.HasNoPath() && !this.movementService.IsPathFinished();
     }
 
     // ----------------------------

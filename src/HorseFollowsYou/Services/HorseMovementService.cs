@@ -286,12 +286,10 @@ internal sealed class HorseMovementService
             return;
         }
 
-        // ----------------------------
-        // 向き変更時は前の移動状態を完全に止めてから切り替える
-        // ----------------------------
-        horse.Halt();
-        this.currentAnimationDirection = -1;
-        this.currentAnimationIntervalMs = -1;
+        horse.SetMovingUp(false);
+        horse.SetMovingRight(false);
+        horse.SetMovingDown(false);
+        horse.SetMovingLeft(false);
 
         switch (facingDirection)
         {
@@ -336,8 +334,7 @@ internal sealed class HorseMovementService
     private void EnsureWalkAnimation(Horse horse, int facingDirection, int frameDurationMs)
     {
         if (horse.Sprite.CurrentAnimation is not null
-            && this.currentAnimationDirection == facingDirection
-            && this.currentAnimationIntervalMs == frameDurationMs)
+            && this.currentAnimationDirection == facingDirection)
         {
             return;
         }
