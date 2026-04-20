@@ -1,8 +1,10 @@
-using System.Reflection;
+﻿using System.Reflection;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using HorseFollowsYou.Integrations;
+using HorseFollowsYou.Multiplayer;
 using HorseFollowsYou.Services;
+using HorseFollowsYou.Services.Multiplayer;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewModdingAPI.Utilities;
@@ -16,17 +18,27 @@ namespace HorseFollowsYou;
 // - 設定読込
 // - イベント登録
 // - GMCM 登録
+// - マルチプレイの同行馬占有同期
+// - マルチプレイの馬ワープ要求受信
 // ----------------------------
 public sealed class ModEntry : Mod
 {
-    private const string SaveDataKey = "follow-mount-settings";
+    private const string ClaimMessageType = "HorseClaimState";
+    private const string WarpRequestMessageType = "HorseWarpRequest";
+
+    private sealed class HorseClaimState
+    {
+        public long PlayerId { get; set; }
+        public long StampUtcMs { get; set; }
+    }
 
     private ModConfig config = new();
-    private FollowMountSaveData saveData = new();
     private HorseFollowManager? followManager;
     private HorseMountRegistry mountRegistry = null!;
+    private HorseRemoteAnimationSyncService remoteAnimationSyncService = null!;
     private GmcmIntegration? gmcmIntegration;
     private IReadOnlyList<HorseMountOption> cachedMountOptions = Array.Empty<HorseMountOption>();
+    private readonly Dictionary<string, HorseClaimState> horseClaims = new(StringComparer.OrdinalIgnoreCase);
     private bool horseWarpEventSubscribed;
 
     // ----------------------------
@@ -35,14 +47,18 @@ public sealed class ModEntry : Mod
     public override void Entry(IModHelper helper)
     {
         this.config = this.NormalizeConfig(helper.ReadConfig<ModConfig>());
-        this.saveData = new FollowMountSaveData();
         this.mountRegistry = new HorseMountRegistry();
+        this.remoteAnimationSyncService = new HorseRemoteAnimationSyncService(this.mountRegistry, this.Monitor, () => this.config);
         this.followManager = new HorseFollowManager(
             helper.Translation,
             () => this.config,
             this.Monitor,
             this.IsHorseDisabled,
-            this.GetDefaultTrackedHorse
+            this.IsHorseClaimedByOther,
+            this.GetDefaultTrackedHorse,
+            this.mountRegistry.FindHorseById,
+            this.OnTrackedHorseChanged,
+            this.RequestHostHorseWarp
         );
 
         helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
@@ -52,6 +68,9 @@ public sealed class ModEntry : Mod
         helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
         helper.Events.Display.RenderedWorld += this.OnRenderedWorld;
         helper.Events.Player.Warped += this.OnWarped;
+        helper.Events.Multiplayer.ModMessageReceived += this.OnModMessageReceived;
+        helper.Events.Multiplayer.PeerConnected += this.OnPeerConnected;
+        helper.Events.Multiplayer.PeerDisconnected += this.OnPeerDisconnected;
     }
 
     // ----------------------------
@@ -79,9 +98,15 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void OnSaveLoaded(object? sender, SaveLoadedEventArgs e)
     {
-        this.LoadSaveData();
+        this.horseClaims.Clear();
+        this.remoteAnimationSyncService.Reset();
         this.RefreshMountOptions();
         this.gmcmIntegration?.RegisterOrReload();
+
+        if (Game1.IsMasterGame)
+        {
+            HorseInstanceConsolidator.ConsolidateAllOnHost(this.mountRegistry);
+        }
 
         this.SubscribeHorseWarpEvent();
         this.followManager?.OnSaveLoaded();
@@ -94,6 +119,12 @@ public sealed class ModEntry : Mod
     {
         this.RefreshMountOptions();
         this.gmcmIntegration?.RegisterOrReload();
+
+        if (Game1.IsMasterGame)
+        {
+            HorseInstanceConsolidator.ConsolidateAllOnHost(this.mountRegistry);
+        }
+
         this.followManager?.OnMountFilterChanged();
     }
 
@@ -103,8 +134,9 @@ public sealed class ModEntry : Mod
     private void OnReturnedToTitle(object? sender, ReturnedToTitleEventArgs e)
     {
         this.UnsubscribeHorseWarpEvent();
-        this.saveData = new FollowMountSaveData();
+        this.horseClaims.Clear();
         this.cachedMountOptions = Array.Empty<HorseMountOption>();
+        this.remoteAnimationSyncService.Reset();
         this.gmcmIntegration?.RegisterOrReload();
         this.followManager?.Reset();
     }
@@ -115,6 +147,7 @@ public sealed class ModEntry : Mod
     private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
     {
         this.followManager?.OnUpdateTicked(e.Ticks);
+        this.remoteAnimationSyncService.Update(this.IsHorseClaimed, this.IsHorseLocallyControlled);
     }
 
     // ----------------------------
@@ -159,7 +192,84 @@ public sealed class ModEntry : Mod
             return;
         }
 
+        string? oldLocationName = e.OldLocation?.NameOrUniqueName;
+        string? newLocationName = e.NewLocation?.NameOrUniqueName;
+        bool changedMap = !string.Equals(oldLocationName, newLocationName, StringComparison.OrdinalIgnoreCase);
+
+        if (!changedMap)
+        {
+            return;
+        }
+
         this.followManager?.OnWarped();
+        this.followManager?.OnLocalPlayerWarpedToDifferentMap();
+    }
+
+    // ----------------------------
+    // マルチプレイメッセージを受信して処理を振り分ける
+    // ----------------------------
+    private void OnModMessageReceived(object? sender, ModMessageReceivedEventArgs e)
+    {
+        if (!e.FromModID.Equals(this.ModManifest.UniqueID, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (e.Type.Equals(ClaimMessageType, StringComparison.Ordinal))
+        {
+            HorseClaimMessage message = e.ReadAs<HorseClaimMessage>();
+            this.ApplyHorseClaimMessage(message);
+            return;
+        }
+
+        if (e.Type.Equals(WarpRequestMessageType, StringComparison.Ordinal))
+        {
+            HorseWarpRequestMessage message = e.ReadAs<HorseWarpRequestMessage>();
+            this.ApplyHorseWarpRequestMessage(message);
+        }
+    }
+
+    // ----------------------------
+    // 新しく参加したプレイヤーへ現在の占有状態を送る
+    // ----------------------------
+    private void OnPeerConnected(object? sender, PeerConnectedEventArgs e)
+    {
+        if (!Context.IsWorldReady || !Game1.IsMasterGame)
+        {
+            return;
+        }
+
+        foreach ((string horseId, HorseClaimState claim) in this.horseClaims)
+        {
+            HorseClaimMessage message = new()
+            {
+                HorseId = horseId,
+                PlayerId = claim.PlayerId,
+                StampUtcMs = claim.StampUtcMs,
+                IsClaimed = true,
+            };
+
+            this.Helper.Multiplayer.SendMessage(
+                message,
+                ClaimMessageType,
+                new[] { this.ModManifest.UniqueID },
+                new[] { e.Peer.PlayerID }
+            );
+        }
+    }
+
+    // ----------------------------
+    // 切断したプレイヤーの占有状態を解除する
+    // ----------------------------
+    private void OnPeerDisconnected(object? sender, PeerDisconnectedEventArgs e)
+    {
+        foreach (string horseId in this.horseClaims
+            .Where(pair => pair.Value.PlayerId == e.Peer.PlayerID)
+            .Select(pair => pair.Key)
+            .ToList())
+        {
+            this.horseClaims.Remove(horseId);
+        }
     }
 
     // ----------------------------
@@ -215,37 +325,12 @@ public sealed class ModEntry : Mod
     }
 
     // ----------------------------
-    // セーブデータを読み込む
-    // ----------------------------
-    private void LoadSaveData()
-    {
-        FollowMountSaveData? loaded = this.Helper.Data.ReadSaveData<FollowMountSaveData>(SaveDataKey);
-        this.saveData = this.NormalizeSaveData(loaded);
-    }
-
-    // ----------------------------
-    // セーブデータを保存する
-    // ----------------------------
-    private void SaveSaveData()
-    {
-        if (!Context.IsWorldReady)
-        {
-            return;
-        }
-
-        this.Helper.Data.WriteSaveData(SaveDataKey, this.NormalizeSaveData(this.saveData));
-    }
-
-    // ----------------------------
     // GMCM からの全設定保存を行う
     // ----------------------------
     private void SaveAllSettings()
     {
         this.config = this.NormalizeConfig(this.config);
-        this.saveData = this.NormalizeSaveData(this.saveData);
-
         this.Helper.WriteConfig(this.config);
-        this.SaveSaveData();
         this.RefreshMountOptions();
         this.followManager?.OnMountFilterChanged();
     }
@@ -255,8 +340,23 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void ResetAllSettings()
     {
-        this.config = this.NormalizeConfig(new ModConfig());
-        this.saveData = new FollowMountSaveData();
+        string? currentSaveKey = this.GetCurrentSaveConfigKey();
+        Dictionary<string, List<string>> preservedPerSave = this.config.DisabledHorseIdsBySaveId
+            .ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.ToList(),
+                StringComparer.OrdinalIgnoreCase
+            );
+
+        if (currentSaveKey is not null)
+        {
+            preservedPerSave.Remove(currentSaveKey);
+        }
+
+        ModConfig resetConfig = this.NormalizeConfig(new ModConfig());
+        resetConfig.DisabledHorseIdsBySaveId = preservedPerSave;
+        this.config = resetConfig;
+
         this.RefreshMountOptions();
         this.followManager?.OnMountFilterChanged();
     }
@@ -274,8 +374,15 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private bool IsHorseDisabled(string horseId)
     {
+        string? currentSaveKey = this.GetCurrentSaveConfigKey();
+        if (currentSaveKey is null
+            || !this.config.DisabledHorseIdsBySaveId.TryGetValue(currentSaveKey, out List<string>? disabledHorseIds))
+        {
+            return false;
+        }
+
         string normalizedHorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId);
-        return this.saveData.DisabledHorseIds.Any(savedId => string.Equals(
+        return disabledHorseIds.Any(savedId => string.Equals(
             HorseMountRegistry.NormalizeHorseIdKey(savedId),
             normalizedHorseId,
             StringComparison.OrdinalIgnoreCase
@@ -287,20 +394,35 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private void SetHorseDisabled(string horseId, bool disabled)
     {
-        string normalizedHorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId);
+        string? currentSaveKey = this.GetCurrentSaveConfigKey();
+        if (currentSaveKey is null)
+        {
+            return;
+        }
 
-        this.saveData.DisabledHorseIds = this.saveData.DisabledHorseIds
-            .Where(savedId => !string.Equals(
-                HorseMountRegistry.NormalizeHorseIdKey(savedId),
-                normalizedHorseId,
-                StringComparison.OrdinalIgnoreCase
-            ))
-            .ToList();
+        string normalizedHorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId);
+        if (!this.config.DisabledHorseIdsBySaveId.TryGetValue(currentSaveKey, out List<string>? disabledHorseIds))
+        {
+            disabledHorseIds = new List<string>();
+            this.config.DisabledHorseIdsBySaveId[currentSaveKey] = disabledHorseIds;
+        }
+
+        disabledHorseIds.RemoveAll(savedId => string.Equals(
+            HorseMountRegistry.NormalizeHorseIdKey(savedId),
+            normalizedHorseId,
+            StringComparison.OrdinalIgnoreCase
+        ));
 
         if (disabled)
         {
-            this.saveData.DisabledHorseIds.Add(normalizedHorseId);
+            disabledHorseIds.Add(normalizedHorseId);
         }
+
+        this.config.DisabledHorseIdsBySaveId[currentSaveKey] = disabledHorseIds
+            .Select(HorseMountRegistry.NormalizeHorseIdKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(savedId => savedId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     // ----------------------------
@@ -308,22 +430,245 @@ public sealed class ModEntry : Mod
     // ----------------------------
     private Horse? GetDefaultTrackedHorse()
     {
-        return this.mountRegistry.FindFirstEligibleHorse(this.IsHorseDisabled);
+        return this.mountRegistry.FindFirstEligibleHorse(horse => !this.IsHorseDisabled(HorseMountRegistry.GetHorseIdKey(horse)) && !this.IsHorseClaimedByOther(horse));
     }
 
     // ----------------------------
-    // セーブデータの内容を補正する
+    // 現在のセーブデータ用の設定キーを返す
     // ----------------------------
-    private FollowMountSaveData NormalizeSaveData(FollowMountSaveData? saveData)
+    private string? GetCurrentSaveConfigKey()
     {
-        saveData ??= new FollowMountSaveData();
-        saveData.DisabledHorseIds = (saveData.DisabledHorseIds ?? new List<string>())
-            .Where(static horseId => !string.IsNullOrWhiteSpace(horseId))
-            .Select(HorseMountRegistry.NormalizeHorseIdKey)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(static horseId => horseId, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        return saveData;
+        if (!Context.IsWorldReady)
+        {
+            return null;
+        }
+
+        return Game1.uniqueIDForThisGame.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    // ----------------------------
+    // 指定した馬が占有中か判定する
+    // ----------------------------
+    private bool IsHorseClaimed(string horseId)
+    {
+        return this.horseClaims.ContainsKey(HorseMountRegistry.NormalizeHorseIdKey(horseId));
+    }
+
+    // ----------------------------
+    // 指定した馬が他プレイヤーに占有されているか判定する
+    // ----------------------------
+    private bool IsHorseClaimedByOther(Horse horse)
+    {
+        if (!Context.IsWorldReady || Game1.player is null)
+        {
+            return false;
+        }
+
+        string horseId = HorseMountRegistry.NormalizeHorseIdKey(HorseMountRegistry.GetHorseIdKey(horse));
+        return this.horseClaims.TryGetValue(horseId, out HorseClaimState? claim)
+            && claim.PlayerId != Game1.player.UniqueMultiplayerID;
+    }
+
+    // ----------------------------
+    // 指定した馬がこの画面で制御中か判定する
+    // ----------------------------
+    private bool IsHorseLocallyControlled(string horseId)
+    {
+        return string.Equals(
+            this.followManager?.GetTrackedHorseId(),
+            HorseMountRegistry.NormalizeHorseIdKey(horseId),
+            StringComparison.OrdinalIgnoreCase
+        );
+    }
+
+    // ----------------------------
+    // 追跡対象の変更にあわせて占有状態を通知する
+    // ----------------------------
+    private void OnTrackedHorseChanged(string? previousHorseId, string? currentHorseId)
+    {
+        if (!Context.IsWorldReady || Game1.player is null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(previousHorseId))
+        {
+            this.BroadcastHorseClaim(previousHorseId, isClaimed: false);
+        }
+
+        if (!string.IsNullOrWhiteSpace(currentHorseId))
+        {
+            this.BroadcastHorseClaim(currentHorseId, isClaimed: true);
+        }
+    }
+
+    // ----------------------------
+    // クライアントからホストへ馬ワープ要求を送る
+    // ----------------------------
+    private void RequestHostHorseWarp(string horseId, string locationName, Point playerTile, int facingDirection)
+    {
+        if (!Context.IsWorldReady || Game1.player is null || Game1.IsMasterGame)
+        {
+            return;
+        }
+
+        HorseWarpRequestMessage message = new()
+        {
+            HorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId),
+            PlayerId = Game1.player.UniqueMultiplayerID,
+            LocationName = locationName,
+            PlayerTileX = playerTile.X,
+            PlayerTileY = playerTile.Y,
+            FacingDirection = facingDirection,
+        };
+
+        this.Helper.Multiplayer.SendMessage(
+            message,
+            WarpRequestMessageType,
+            new[] { this.ModManifest.UniqueID }
+        );
+    }
+
+    // ----------------------------
+    // ホスト側で馬ワープ要求を受け取り正式な馬実体を移動する
+    // ----------------------------
+    private void ApplyHorseWarpRequestMessage(HorseWarpRequestMessage message)
+    {
+        if (!Context.IsWorldReady || !Game1.IsMasterGame)
+        {
+            return;
+        }
+
+        Farmer? farmer = Game1.getAllFarmers().FirstOrDefault(player => player.UniqueMultiplayerID == message.PlayerId);
+        if (farmer is null)
+        {
+            return;
+        }
+
+        Horse? horse = this.mountRegistry.FindHorseById(message.HorseId);
+        if (horse is null)
+        {
+            return;
+        }
+
+        GameLocation? targetLocation = this.FindLocationByNameOrUniqueName(message.LocationName) ?? farmer.currentLocation;
+        if (targetLocation is null)
+        {
+            return;
+        }
+
+        Utility.HorseWarpRestrictions restrictions = Utility.GetHorseWarpRestrictionsForFarmer(farmer);
+        Utility.HorseWarpRestrictions hardBlock = restrictions & (Utility.HorseWarpRestrictions.NoOwnedHorse | Utility.HorseWarpRestrictions.Indoors | Utility.HorseWarpRestrictions.InUse);
+        if (hardBlock != Utility.HorseWarpRestrictions.None)
+        {
+            return;
+        }
+
+        HorseWarpCoordinator coordinator = new(() => this.config, this.Monitor);
+        horse.mutex.RequestLock(() =>
+        {
+            try
+            {
+                HorseWarpCoordinator.WarpAttemptResult result = coordinator.TryWarpHorseNearTargetTile(horse, targetLocation, message.GetPlayerTile(), message.FacingDirection);
+            }
+            finally
+            {
+                horse.mutex.ReleaseLock();
+            }
+        });
+    }
+
+    // ----------------------------
+    // 名前または一意名からロケーションを検索する
+    // ----------------------------
+    private GameLocation? FindLocationByNameOrUniqueName(string locationName)
+    {
+        if (string.IsNullOrWhiteSpace(locationName) || !Context.IsWorldReady)
+        {
+            return null;
+        }
+
+        GameLocation? foundLocation = null;
+        Utility.ForEachLocation(
+            location =>
+            {
+                if (string.Equals(location.NameOrUniqueName, locationName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(location.Name, locationName, StringComparison.OrdinalIgnoreCase))
+                {
+                    foundLocation = location;
+                    return false;
+                }
+
+                return true;
+            },
+            true,
+            true
+        );
+
+        return foundLocation;
+    }
+
+    // ----------------------------
+    // 馬の占有状態をローカル適用して他プレイヤーへ通知する
+    // ----------------------------
+    private void BroadcastHorseClaim(string horseId, bool isClaimed)
+    {
+        if (!Context.IsWorldReady || Game1.player is null)
+        {
+            return;
+        }
+
+        HorseClaimMessage message = new()
+        {
+            HorseId = HorseMountRegistry.NormalizeHorseIdKey(horseId),
+            PlayerId = Game1.player.UniqueMultiplayerID,
+            StampUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            IsClaimed = isClaimed,
+        };
+
+        this.ApplyHorseClaimMessage(message);
+        this.Helper.Multiplayer.SendMessage(
+            message,
+            ClaimMessageType,
+            new[] { this.ModManifest.UniqueID }
+        );
+    }
+
+    // ----------------------------
+    // 受信した占有状態をローカルへ反映する
+    // ----------------------------
+    private void ApplyHorseClaimMessage(HorseClaimMessage message)
+    {
+        string horseId = HorseMountRegistry.NormalizeHorseIdKey(message.HorseId);
+
+        if (message.IsClaimed)
+        {
+            if (this.horseClaims.TryGetValue(horseId, out HorseClaimState? existingClaim)
+                && existingClaim.StampUtcMs > message.StampUtcMs)
+            {
+                return;
+            }
+
+            this.horseClaims[horseId] = new HorseClaimState
+            {
+                PlayerId = message.PlayerId,
+                StampUtcMs = message.StampUtcMs,
+            };
+
+            if (Context.IsWorldReady && Game1.player is not null && message.PlayerId != Game1.player.UniqueMultiplayerID)
+            {
+                this.followManager?.OnHorseClaimedByOther(horseId);
+            }
+
+            return;
+        }
+
+        if (this.horseClaims.TryGetValue(horseId, out HorseClaimState? currentClaim)
+            && currentClaim.PlayerId == message.PlayerId
+            && currentClaim.StampUtcMs <= message.StampUtcMs)
+        {
+            this.horseClaims.Remove(horseId);
+        }
     }
 
     // ----------------------------
@@ -346,6 +691,18 @@ public sealed class ModEntry : Mod
         config.NearSpeedMultiplier = System.Math.Clamp(config.NearSpeedMultiplier, 0.25f, 6.0f);
         config.MidSpeedMultiplier = System.Math.Clamp(config.MidSpeedMultiplier, 0.25f, 6.0f);
         config.FarSpeedMultiplier = System.Math.Clamp(config.FarSpeedMultiplier, 0.25f, 6.0f);
+        config.DisabledHorseIdsBySaveId = (config.DisabledHorseIdsBySaveId ?? new Dictionary<string, List<string>>())
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Key))
+            .ToDictionary(
+                pair => pair.Key.Trim(),
+                pair => (pair.Value ?? new List<string>())
+                    .Where(horseId => !string.IsNullOrWhiteSpace(horseId))
+                    .Select(HorseMountRegistry.NormalizeHorseIdKey)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(horseId => horseId, StringComparer.OrdinalIgnoreCase)
+                    .ToList(),
+                StringComparer.OrdinalIgnoreCase
+            );
 
         return config;
     }

@@ -23,21 +23,36 @@ internal sealed class HorsePathfinder
     }
 
     // ----------------------------
-    // 経路を探索する
+    // メインスレッド上で経路を探索する
     // ----------------------------
     public List<Point>? BuildPath(GameLocation location, Horse horse, Point start, Point goal, out int expanded)
     {
+        HorsePathSnapshot? snapshot = this.targetResolver.CreatePathSnapshot(location, horse, start, goal);
+        if (snapshot is null)
+        {
+            expanded = 0;
+            return null;
+        }
+
+        return this.BuildPath(snapshot, out expanded);
+    }
+
+    // ----------------------------
+    // スナップショットから経路を探索する
+    // ----------------------------
+    public List<Point>? BuildPath(HorsePathSnapshot snapshot, out int expanded)
+    {
         expanded = 0;
 
-        if (start == goal)
+        if (snapshot.Start == snapshot.Goal)
         {
             return new List<Point>();
         }
 
         Queue<Point> open = new();
         Dictionary<Point, Point?> cameFrom = new();
-        open.Enqueue(start);
-        cameFrom[start] = null;
+        open.Enqueue(snapshot.Start);
+        cameFrom[snapshot.Start] = null;
 
         const int maxExpanded = 2500;
 
@@ -53,20 +68,20 @@ internal sealed class HorsePathfinder
                     continue;
                 }
 
-                if (!this.targetResolver.IsInsideMap(location, next))
+                if (!snapshot.IsInsideBounds(next))
                 {
                     continue;
                 }
 
-                if (next != goal && !this.targetResolver.CanOccupyTile(location, horse, next))
+                if (next != snapshot.Goal && !snapshot.CanOccupy(next))
                 {
                     continue;
                 }
 
                 cameFrom[next] = current;
-                if (next == goal)
+                if (next == snapshot.Goal)
                 {
-                    return this.ReconstructPath(cameFrom, goal);
+                    return this.ReconstructPath(cameFrom, snapshot.Goal);
                 }
 
                 open.Enqueue(next);

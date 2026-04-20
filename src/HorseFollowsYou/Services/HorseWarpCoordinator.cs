@@ -1,4 +1,5 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
+using HorseFollowsYou.Services.Multiplayer;
 using Microsoft.Xna.Framework;
 using StardewModdingAPI;
 using StardewValley;
@@ -8,10 +9,9 @@ using StardewValley.Locations;
 namespace HorseFollowsYou.Services;
 
 // ----------------------------
-// 馬のマップ跨ぎ同行を管理する
-// - ワープ可否の判定
-// - 空きタイル探索
-// - 再試行状態の管理
+// 馬のワープ処理を管理する
+// - 正式ワープはホストだけが行う
+// - 同一マップ内ワープ / マップ跨ぎワープの候補を決める
 // ----------------------------
 internal sealed class HorseWarpCoordinator
 {
@@ -77,7 +77,7 @@ internal sealed class HorseWarpCoordinator
 
         Utility.HorseWarpRestrictions restrictions = Utility.GetHorseWarpRestrictionsForFarmer(player);
         Utility.HorseWarpRestrictions hardBlock = this.NormalizeHardBlockRestriction(restrictions);
-
+        
         // ----------------------------
         // NoRoom 以外の制限は同ロケーション中スキップ対象にする
         // ----------------------------
@@ -85,11 +85,6 @@ internal sealed class HorseWarpCoordinator
         {
             this.ClearRetryBlock();
             this.SetHardBlock(toLocation, hardBlock);
-
-            this.DebugLog(
-                $"Horse warp skipped: reason=Restriction, restriction={hardBlock}, playerLocation={toLocation}, playerTile={this.FormatTile(playerTile)}, horseLocation={fromLocation}, horseTile={this.FormatTile(horseTileBefore)}"
-            );
-
             return WarpAttemptResult.Blocked;
         }
 
@@ -97,7 +92,7 @@ internal sealed class HorseWarpCoordinator
         // hard block ではないので解除する
         // ----------------------------
         this.ClearHardBlock();
-
+        
         // ----------------------------
         // 再試行待ち中なら、8タイル以上動くまで探索しない
         // ロケーションが変わった場合は再試行を許可する
@@ -115,35 +110,49 @@ internal sealed class HorseWarpCoordinator
                 : RetryBlockReason.NoOpenTile;
 
             this.SetRetryBlock(player, reason);
-
-            this.DebugLog(
-                $"Horse warp skipped: reason={reason}, playerLocation={toLocation}, playerTile={this.FormatTile(playerTile)}, horseLocation={fromLocation}, horseTile={this.FormatTile(horseTileBefore)}"
-            );
-
             return WarpAttemptResult.RetryLater;
         }
 
+        return this.PerformHostWarp(horse, player.currentLocation, playerTile, new Point((int)openTile.X, (int)openTile.Y), playSummonEffects);
+    }
+
+    public WarpAttemptResult TryWarpHorseNearTargetTile(Horse horse, GameLocation targetLocation, Point playerTile, int facingDirection, bool playSummonEffects = false)
+    {
+        string fromLocation = horse.currentLocation.NameOrUniqueName;
+        string toLocation = targetLocation.NameOrUniqueName;
+        Point horseTileBefore = horse.TilePoint;
+
+        Vector2 openTile = this.FindOpenTileAroundTarget(horse, targetLocation, playerTile, facingDirection);
+        if (openTile == Vector2.Zero)
+        {
+            return WarpAttemptResult.Blocked;
+        }
+
+        return this.PerformHostWarp(horse, targetLocation, playerTile, new Point((int)openTile.X, (int)openTile.Y), playSummonEffects);
+    }
+
+    private WarpAttemptResult PerformHostWarp(Horse horse, GameLocation targetLocation, Point playerTile, Point horseTile, bool playSummonEffects)
+    {
+        string fromLocation = horse.currentLocation.NameOrUniqueName;
+        string toLocation = targetLocation.NameOrUniqueName;
+        Point horseTileBefore = horse.TilePoint;
         GameLocation fromLocationRef = horse.currentLocation;
         Point horseTileBeforeWarp = horse.TilePoint;
 
-        Game1.warpCharacter(horse, player.currentLocation, openTile);
+        Game1.warpCharacter(horse, targetLocation, new Vector2(horseTile.X, horseTile.Y));
         horse.Halt();
         horse.controller = null;
+        HorseInstanceConsolidator.ConsolidateHorseInstanceOnHost(horse, targetLocation);
 
         Point horseTileAfter = horse.TilePoint;
-
+        
         if (playSummonEffects)
         {
-            this.PlayHorseFluteWarpEffects(fromLocationRef, horseTileBeforeWarp, player.currentLocation, horseTileAfter);
+            this.PlayHorseFluteWarpEffects(fromLocationRef, horseTileBeforeWarp, targetLocation, horseTileAfter);
         }
-        int manhattanDistance = this.GetManhattanDistance(playerTile, horseTileAfter);
 
         this.ClearRetryBlock();
-
-        this.DebugLog(
-            $"Horse warped: fromLocation={fromLocation}, toLocation={toLocation}, playerTile={this.FormatTile(playerTile)}, horseTileBefore={this.FormatTile(horseTileBefore)}, horseTileAfter={this.FormatTile(horseTileAfter)}, manhattanDistance={manhattanDistance}"
-        );
-
+        int manhattanDistance = this.GetManhattanDistance(playerTile, horseTileAfter);
         return WarpAttemptResult.Warped;
     }
 
@@ -241,9 +250,16 @@ internal sealed class HorseWarpCoordinator
     // ----------------------------
     private Vector2 FindOpenTileAroundPlayer(Horse horse, Farmer player)
     {
+        return this.FindOpenTileAroundTarget(horse, player.currentLocation, player.TilePoint, player.FacingDirection);
+    }
+
+    private Vector2 FindOpenTileAroundTarget(Horse horse, GameLocation location, Point playerTile, int facingDirection)
+    {
         return this.FindOpenTileInRings(
             horse,
-            player,
+            location,
+            playerTile,
+            facingDirection,
             minRadius: 2,
             maxRadius: 12,
             includeFrontLine: false,
@@ -254,10 +270,9 @@ internal sealed class HorseWarpCoordinator
     // ----------------------------
     // 指定半径の候補を近い順で探す
     // ----------------------------
-    private Vector2 FindOpenTileInRings(Horse horse, Farmer player, int minRadius, int maxRadius, bool includeFrontLine, bool includeBackLine)
+    private Vector2 FindOpenTileInRings(Horse horse, GameLocation location, Point playerTile, int facingDirection, int minRadius, int maxRadius, bool includeFrontLine, bool includeBackLine)
     {
-        Point playerTile = player.TilePoint;
-        Point forward = this.GetDirectionPoint(player.FacingDirection);
+        Point forward = this.GetDirectionPoint(facingDirection);
         Point left = new(-forward.Y, forward.X);
         Point right = new(forward.Y, -forward.X);
         Point back = new(-forward.X, -forward.Y);
@@ -266,7 +281,7 @@ internal sealed class HorseWarpCoordinator
         {
             foreach (Point candidate in this.EnumerateCandidatesForRadius(playerTile, radius, left, right, forward, back, includeFrontLine, includeBackLine))
             {
-                if (this.CanPlaceHorseAtTile(horse, player.currentLocation, candidate))
+                if (this.CanPlaceHorseAtTile(horse, location, candidate))
                 {
                     return new Vector2(candidate.X, candidate.Y);
                 }
@@ -402,7 +417,7 @@ internal sealed class HorseWarpCoordinator
                 motion = new Vector2(Utility.RandomFloat(-0.5f, 0.5f), Utility.RandomFloat(-0.5f, 0.5f)),
             };
 
-            location.temporarySprites.Add(sprite);
+            Game1.Multiplayer.broadcastSprites(location, sprite);
         }
     }
 
@@ -411,8 +426,7 @@ internal sealed class HorseWarpCoordinator
     // ----------------------------
     private void AddHorseFluteArrivalTrail(GameLocation location, Point centerTile)
     {
-        int delayStep = 0;
-
+        int delay = 0;
         for (int x = centerTile.X + 3; x >= centerTile.X - 3; x--)
         {
             TemporaryAnimatedSprite sprite = new(
@@ -425,27 +439,15 @@ internal sealed class HorseWarpCoordinator
             )
             {
                 layerDepth = 1f,
-                delayBeforeAnimationStart = delayStep * 25,
+                delayBeforeAnimationStart = delay * 25,
                 motion = new Vector2(-0.25f, 0f),
             };
 
-            location.temporarySprites.Add(sprite);
-            delayStep++;
+            Game1.Multiplayer.broadcastSprites(location, sprite);
+            delay++;
         }
     }
 
-// ----------------------------
-    // デバッグログを出す
-    // ----------------------------
-    private void DebugLog(string message)
-    {
-        if (!this.getConfig().DebugMode)
-        {
-            return;
-        }
-
-        this.monitor.Log(message, LogLevel.Debug);
-    }
 
     // ----------------------------
     // 向き番号から方向ベクトルを返す
@@ -469,7 +471,7 @@ internal sealed class HorseWarpCoordinator
     {
         return new Point(origin.X + direction.X * distance, origin.Y + direction.Y * distance);
     }
-
+    
     // ----------------------------
     // タイル座標を文字列へ変換する
     // ----------------------------

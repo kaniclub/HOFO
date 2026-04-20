@@ -81,9 +81,22 @@ internal sealed class HorseMountRegistry
     // ----------------------------
     // 最初に使える馬を返す
     // ----------------------------
-    public Horse? FindFirstEligibleHorse(Func<string, bool> isHorseDisabled)
+    public Horse? FindFirstEligibleHorse(Func<Horse, bool> isEligibleHorse)
     {
-        return this.GetWorldHorses().FirstOrDefault(horse => !isHorseDisabled(GetHorseIdKey(horse)));
+        return this.GetWorldHorses().FirstOrDefault(isEligibleHorse);
+    }
+
+    // ----------------------------
+    // HorseId から現在の実体を引き直す
+    // ----------------------------
+    public Horse? FindHorseById(string horseId)
+    {
+        string normalizedHorseId = NormalizeHorseIdKey(horseId);
+        return this.GetWorldHorses().FirstOrDefault(horse => string.Equals(
+            GetHorseIdKey(horse),
+            normalizedHorseId,
+            StringComparison.OrdinalIgnoreCase
+        ));
     }
 
     // ----------------------------
@@ -135,5 +148,5 @@ internal sealed class HorseMountRegistry
 
         return "Horse";
     }
-
+    
 }

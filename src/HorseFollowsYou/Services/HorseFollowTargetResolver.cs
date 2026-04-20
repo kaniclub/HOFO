@@ -243,6 +243,48 @@ internal sealed class HorseFollowTargetResolver
     }
 
     // ----------------------------
+    // 非同期探索用のスナップショットを作る
+    // ----------------------------
+    public HorsePathSnapshot? CreatePathSnapshot(GameLocation location, Horse horse, Point start, Point goal)
+    {
+        if (!this.IsInsideMap(location, start) || !this.IsInsideMap(location, goal))
+        {
+            return null;
+        }
+
+        int searchPadding = this.GetSnapshotPadding(start, goal);
+        int minX = System.Math.Max(0, System.Math.Min(start.X, goal.X) - searchPadding);
+        int minY = System.Math.Max(0, System.Math.Min(start.Y, goal.Y) - searchPadding);
+        int maxX = System.Math.Min(location.Map.Layers[0].LayerWidth - 1, System.Math.Max(start.X, goal.X) + searchPadding);
+        int maxY = System.Math.Min(location.Map.Layers[0].LayerHeight - 1, System.Math.Max(start.Y, goal.Y) + searchPadding);
+
+        int width = maxX - minX + 1;
+        int height = maxY - minY + 1;
+        bool[] occupiableTiles = new bool[width * height];
+
+        for (int y = minY; y <= maxY; y++)
+        {
+            for (int x = minX; x <= maxX; x++)
+            {
+                Point tile = new(x, y);
+                bool occupiable = tile == start || tile == goal || this.CanOccupyTile(location, horse, tile);
+                occupiableTiles[((y - minY) * width) + (x - minX)] = occupiable;
+            }
+        }
+
+        return new HorsePathSnapshot(minX, minY, width, height, start, goal, occupiableTiles);
+    }
+
+    // ----------------------------
+    // スナップショット化する範囲の余白を返す
+    // ----------------------------
+    private int GetSnapshotPadding(Point start, Point goal)
+    {
+        int manhattanDistance = System.Math.Abs(start.X - goal.X) + System.Math.Abs(start.Y - goal.Y);
+        return System.Math.Clamp(manhattanDistance + 8, 12, 48);
+    }
+
+    // ----------------------------
     // タイルがマップ内か確認する
     // ----------------------------
     public bool IsInsideMap(StardewValley.GameLocation location, Point tile)

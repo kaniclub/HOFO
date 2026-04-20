@@ -35,11 +35,17 @@ internal sealed class HorseFollowManager
     private readonly HorseWarpCoordinator warpCoordinator;
     private readonly HorseFollowTargetResolver targetResolver;
     private readonly HorsePathfinder pathfinder;
+    private readonly HorseAsyncPathService asyncPathService;
     private readonly HorseMovementService movementService;
     private readonly Func<string, bool> isHorseDisabled;
+    private readonly Func<Horse, bool> isHorseClaimedByOther;
     private readonly Func<Horse?> getDefaultTrackedHorse;
+    private readonly Func<string, Horse?> findHorseById;
+    private readonly Action<string?, string?> onTrackedHorseChanged;
+    private readonly Action<string, string, Point, int> onRemoteWarpSyncRequested;
 
     private Horse? trackedHorse;
+    private string? trackedHorseId;
     private FollowState state = FollowState.Idle;
     private bool followEnabled;
     private bool wasMountedLastTick;
@@ -56,6 +62,9 @@ internal sealed class HorseFollowManager
     private bool horseSummonedThisTick;
     private bool horseFluteWarpRequested;
     private long targetNotFoundRetryUntilMs;
+    private long lastRemoteWarpRequestAtMs;
+    private string? lastRemoteWarpRequestLocationName;
+    private Point? lastRemoteWarpRequestPlayerTile;
 
     // ----------------------------
     // フルートワープ要求を受け取る
@@ -110,16 +119,25 @@ internal sealed class HorseFollowManager
         System.Func<ModConfig> getConfig,
         IMonitor monitor,
         Func<string, bool> isHorseDisabled,
-        Func<Horse?> getDefaultTrackedHorse)
+        Func<Horse, bool> isHorseClaimedByOther,
+        Func<Horse?> getDefaultTrackedHorse,
+        Func<string, Horse?> findHorseById,
+        Action<string?, string?> onTrackedHorseChanged,
+        Action<string, string, Point, int> onRemoteWarpSyncRequested)
     {
         this.translation = translation;
         this.getConfig = getConfig;
         this.monitor = monitor;
         this.isHorseDisabled = isHorseDisabled;
+        this.isHorseClaimedByOther = isHorseClaimedByOther;
         this.getDefaultTrackedHorse = getDefaultTrackedHorse;
+        this.findHorseById = findHorseById;
+        this.onTrackedHorseChanged = onTrackedHorseChanged;
+        this.onRemoteWarpSyncRequested = onRemoteWarpSyncRequested;
         this.warpCoordinator = new HorseWarpCoordinator(getConfig, monitor);
         this.targetResolver = new HorseFollowTargetResolver(getConfig);
         this.pathfinder = new HorsePathfinder(this.targetResolver);
+        this.asyncPathService = new HorseAsyncPathService(this.pathfinder);
         this.movementService = new HorseMovementService(getConfig, this.targetResolver);
         this.Reset();
     }
@@ -131,6 +149,7 @@ internal sealed class HorseFollowManager
     {
         this.ReleaseTrackedHorseCollision();
         this.trackedHorse = null;
+        this.trackedHorseId = null;
         this.state = FollowState.Idle;
         this.followEnabled = true;
         this.wasMountedLastTick = false;
@@ -147,7 +166,11 @@ internal sealed class HorseFollowManager
         this.horseSummonedThisTick = false;
         this.horseFluteWarpRequested = false;
         this.targetNotFoundRetryUntilMs = 0;
+        this.lastRemoteWarpRequestAtMs = 0;
+        this.lastRemoteWarpRequestLocationName = null;
+        this.lastRemoteWarpRequestPlayerTile = null;
         this.movementService.Reset();
+        this.asyncPathService.Reset();
         this.warpCoordinator.ResetRetryState();
     }
 
@@ -175,9 +198,9 @@ internal sealed class HorseFollowManager
         this.RefreshLocationFollowPauseState();
         this.ResetPathFailureState();
 
-        if (this.trackedHorse is not null && !this.IsTrackedHorseStillValid())
+        if (this.trackedHorse is not null && !this.IsTrackedHorseStillValid() && !this.TryRefreshTrackedHorseReference())
         {
-            this.ClearTrackedHorse();
+            this.DropTrackedHorseReferenceTransient();
         }
 
         this.lastPlayerTile = Game1.player.TilePoint;
@@ -192,8 +215,12 @@ internal sealed class HorseFollowManager
 
         if (this.trackedHorse is null)
         {
-            this.state = FollowState.Idle;
-            return;
+            this.SyncTrackedHorse();
+            if (this.trackedHorse is null)
+            {
+                this.state = FollowState.Idle;
+                return;
+            }
         }
 
         // ----------------------------
@@ -216,6 +243,7 @@ internal sealed class HorseFollowManager
 
         if (this.trackedHorse.currentLocation == Game1.player.currentLocation)
         {
+            this.ClearRemoteWarpRequestThrottle();
             this.warpCoordinator.ResetRetryState();
             this.EnterFollowPending();
             return;
@@ -227,6 +255,54 @@ internal sealed class HorseFollowManager
         }
 
         this.state = FollowState.WarpBlocked;
+    }
+
+    // ----------------------------
+    // 非ホストの画面移動直後にホストへ馬ワープ要求を送る
+    // ----------------------------
+    public void OnLocalPlayerWarpedToDifferentMap()
+    {
+        if (!this.IsEnabled() || Game1.IsMasterGame)
+        {
+            return;
+        }
+
+        if (this.pauseFollowUntilWarp || !this.followEnabled || !this.getConfig().EnableWarpFollow)
+        {
+            return;
+        }
+
+        if (this.trackedHorse is null)
+        {
+            this.SyncTrackedHorse();
+        }
+
+        string? trackedHorseId = this.trackedHorseId;
+        if (string.IsNullOrWhiteSpace(trackedHorseId) && this.trackedHorse is not null)
+        {
+            trackedHorseId = HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        }
+
+        if (string.IsNullOrWhiteSpace(trackedHorseId))
+        {
+            return;
+        }
+
+        if (this.trackedHorse is not null && this.trackedHorse.currentLocation == Game1.player.currentLocation)
+        {
+            return;
+        }
+
+        if (!this.TryRequestRemoteWarpSync("on_warp", trackedHorseId))
+        {
+            return;
+        }
+
+        this.state = FollowState.WarpBlocked;
+        if (this.trackedHorse is not null)
+        {
+            this.StopHorse(this.trackedHorse);
+        }
     }
 
     // ----------------------------
@@ -249,9 +325,20 @@ internal sealed class HorseFollowManager
         {
             this.TrackHorse(eligibleMountedHorse);
         }
-        else if (this.trackedHorse is not null && !this.IsTrackedHorseStillValid())
+        else if (this.trackedHorse is not null && !this.IsTrackedHorseStillValid() && !this.TryRefreshTrackedHorseReference())
         {
-            this.ClearTrackedHorse();
+            long pendingSyncNowMs = System.Environment.TickCount64;
+            bool waitingForRemoteWarpSync = !Game1.IsMasterGame
+                && this.lastRemoteWarpRequestAtMs > 0
+                && pendingSyncNowMs - this.lastRemoteWarpRequestAtMs < 4000;
+
+            if (waitingForRemoteWarpSync)
+            {
+            }
+            else
+            {
+                this.DropTrackedHorseReferenceTransient();
+            }
         }
 
         if (this.trackedHorse is not null)
@@ -294,8 +381,12 @@ internal sealed class HorseFollowManager
 
         if (this.trackedHorse is null)
         {
-            this.state = FollowState.Idle;
-            return;
+            this.SyncTrackedHorse();
+            if (this.trackedHorse is null)
+            {
+                this.state = FollowState.Idle;
+                return;
+            }
         }
 
         // ----------------------------
@@ -348,6 +439,7 @@ internal sealed class HorseFollowManager
             return;
         }
 
+        this.ClearRemoteWarpRequestThrottle();
         this.warpCoordinator.ResetRetryState();
 
         if (Game1.activeClickableMenu is not null || Game1.eventUp || !Game1.player.canMove)
@@ -404,7 +496,6 @@ internal sealed class HorseFollowManager
             }
             else
             {
-                this.DebugLog($"[Follow] path_abort distance={horseToPlayerDistance} threshold={this.getConfig().PathAbortDistance} horse={this.trackedHorse.TilePoint} player={Game1.player.TilePoint}");
                 this.HandlePathFailureAction();
                 return;
             }
@@ -421,7 +512,6 @@ internal sealed class HorseFollowManager
         if (targetTile is null)
         {
             this.targetNotFoundRetryUntilMs = nowMs + 500;
-            this.DebugLog($"[PathDebug] target_not_found horse={this.trackedHorse.TilePoint} player={Game1.player.TilePoint} state={this.state}");
             this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
             return;
@@ -430,15 +520,23 @@ internal sealed class HorseFollowManager
         this.targetNotFoundRetryUntilMs = 0;
         this.lastTargetTile = targetTile;
 
+        bool asyncPathFailed;
+        this.TryApplyCompletedAsyncPath(targetTile.Value, nowMs, out asyncPathFailed);
+        if (asyncPathFailed)
+        {
+            this.HandleNoPathFailure();
+            return;
+        }
+
         float targetDistance = Vector2.Distance(this.trackedHorse.Tile, new Vector2(targetTile.Value.X, targetTile.Value.Y));
-        if (targetDistance <= this.getConfig().StopDistance && !this.HasActivePath())
+        if (targetDistance <= this.getConfig().StopDistance && !this.HasActivePath() && !this.asyncPathService.HasPendingRequest())
         {
             this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
             return;
         }
 
-        if (playerDistance < this.getConfig().FollowStartDistance && this.movementService.HasNoPath())
+        if (playerDistance < this.getConfig().FollowStartDistance && this.movementService.HasNoPath() && !this.asyncPathService.HasPendingRequest())
         {
             this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
@@ -447,11 +545,14 @@ internal sealed class HorseFollowManager
 
         if (this.ShouldRebuildPath(nowMs, targetTile.Value))
         {
-            if (!this.RebuildPath(targetTile.Value, nowMs))
-            {
-                this.HandleNoPathFailure();
-                return;
-            }
+            this.TryQueueAsyncPathRebuild(targetTile.Value, nowMs);
+        }
+
+        if (this.asyncPathService.HasPendingRequest() && !this.HasActivePath())
+        {
+            this.state = FollowState.Paused;
+            this.StopHorse(this.trackedHorse);
+            return;
         }
 
         if (this.movementService.IsPathFinished())
@@ -465,7 +566,6 @@ internal sealed class HorseFollowManager
         {
             if (this.state != FollowState.MovementSuppressed)
             {
-                this.DebugLog($"[Follow] move_suppressed distance={horseToPlayerDistance} threshold={this.getConfig().PathAbortDistance} horse={this.trackedHorse.TilePoint} player={Game1.player.TilePoint}");
             }
 
             this.state = FollowState.MovementSuppressed;
@@ -485,7 +585,6 @@ internal sealed class HorseFollowManager
         {
             if (this.noPathFailureCount > 0 || this.noPathRetryPlayerTile is not null)
             {
-                this.DebugLog($"[Follow] move_resumed clear_no_path_retry horse={this.trackedHorse.TilePoint} player={Game1.player.TilePoint}");
             }
 
             this.noPathFailureCount = 0;
@@ -497,7 +596,6 @@ internal sealed class HorseFollowManager
         long stallThresholdMs = System.Math.Max(this.GetPathRebuildMilliseconds(), 250L);
         if (this.movementService.HasNoPath() || stalledMs >= stallThresholdMs)
         {
-            this.DebugLog($"[Follow] no_path_after_move horse={this.trackedHorse.TilePoint} player={Game1.player.TilePoint} state={this.state} hasNoPath={this.movementService.HasNoPath()} stalledMs={stalledMs}");
             this.HandleNoPathFailure();
             return;
         }
@@ -509,6 +607,88 @@ internal sealed class HorseFollowManager
     private bool HasActivePath()
     {
         return !this.movementService.HasNoPath() && !this.movementService.IsPathFinished();
+    }
+
+    // ----------------------------
+    // 完了済みの非同期経路探索結果を反映する
+    // ----------------------------
+    private bool TryApplyCompletedAsyncPath(Point currentTargetTile, long nowMs, out bool failed)
+    {
+        failed = false;
+
+        if (!this.asyncPathService.TryTakeCompleted(out HorseAsyncPathService.PathResult? result) || result is null)
+        {
+            return false;
+        }
+
+        if (this.trackedHorse is null)
+        {
+            return false;
+        }
+
+        string currentHorseId = this.trackedHorseId ?? HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        string currentLocationName = this.trackedHorse.currentLocation.NameOrUniqueName;
+        int startDistance = this.GetManhattanDistance(result.StartTile, this.trackedHorse.TilePoint);
+
+        if (!string.Equals(result.HorseId, currentHorseId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(result.LocationName, currentLocationName, StringComparison.OrdinalIgnoreCase)
+            || result.GoalTile != currentTargetTile
+            || startDistance > 2)
+        {
+            return false;
+        }
+
+        this.lastPathBuildTimeMs = nowMs;
+        if (result.Path is null || result.Path.Count == 0)
+        {
+            this.movementService.SetPath(null);
+            failed = true;
+            return true;
+        }
+
+        this.movementService.SetPath(result.Path);
+        this.lastTargetTile = currentTargetTile;
+        return true;
+    }
+
+    // ----------------------------
+    // 経路再計算要求を非同期で投げる
+    // ----------------------------
+    private bool TryQueueAsyncPathRebuild(Point targetTile, long nowMs)
+    {
+        if (this.trackedHorse is null)
+        {
+            return false;
+        }
+
+        string horseId = this.trackedHorseId ?? HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        string locationName = this.trackedHorse.currentLocation.NameOrUniqueName;
+        Point startTile = this.trackedHorse.TilePoint;
+
+        if (this.asyncPathService.IsPendingFor(horseId, locationName, startTile, targetTile))
+        {
+            return true;
+        }
+
+        if (this.asyncPathService.HasPendingRequest())
+        {
+            return true;
+        }
+
+        HorsePathSnapshot? snapshot = this.targetResolver.CreatePathSnapshot(this.trackedHorse.currentLocation, this.trackedHorse, startTile, targetTile);
+        if (snapshot is null)
+        {
+            this.lastPathBuildTimeMs = nowMs;
+            return false;
+        }
+
+        if (!this.asyncPathService.TryQueue(snapshot, horseId, locationName, startTile, targetTile, nowMs))
+        {
+            return true;
+        }
+
+        this.lastPathBuildTimeMs = nowMs;
+        return true;
     }
 
     // ----------------------------
@@ -530,6 +710,38 @@ internal sealed class HorseFollowManager
         this.lastTargetTile = null;
         this.TrackHorse(horse);
         this.movementService.PrepareMountedState(horse);
+    }
+
+    // ----------------------------
+    // 現在追跡中の馬IDを返す
+    // ----------------------------
+    public string? GetTrackedHorseId()
+    {
+        return this.trackedHorseId;
+    }
+
+    // ----------------------------
+    // 他プレイヤーが同じ馬を同行対象にしたときの処理
+    // ----------------------------
+    public void OnHorseClaimedByOther(string horseId)
+    {
+        if (this.trackedHorse is null)
+        {
+            return;
+        }
+
+        string trackedHorseId = HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        if (!string.Equals(trackedHorseId, HorseMountRegistry.NormalizeHorseIdKey(horseId), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (ReferenceEquals(this.GetEligibleMountedHorse(), this.trackedHorse))
+        {
+            return;
+        }
+
+        this.ClearTrackedHorse();
     }
 
     // ----------------------------
@@ -568,7 +780,6 @@ internal sealed class HorseFollowManager
         else
         {
             this.warpCoordinator.ResetRetryState();
-            this.DebugLog("[Follow] follow_disabled reason=toggle");
             this.ShowMessage("message.follow_disabled");
             if (this.trackedHorse is not null)
             {
@@ -636,14 +847,86 @@ internal sealed class HorseFollowManager
             return false;
         }
 
+        if (!Game1.IsMasterGame)
+        {
+            this.TryRequestRemoteWarpSync("path_failure_or_location_mismatch", this.trackedHorseId ?? HorseMountRegistry.GetHorseIdKey(this.trackedHorse));
+            this.state = FollowState.WarpBlocked;
+            this.StopHorse(this.trackedHorse);
+            return true;
+        }
+
         HorseWarpCoordinator.WarpAttemptResult result = this.warpCoordinator.TryWarpHorseNearPlayer(this.trackedHorse, Game1.player, playSummonEffects);
         if (result == HorseWarpCoordinator.WarpAttemptResult.Warped)
         {
+            this.ClearRemoteWarpRequestThrottle();
             this.EnterFollowPending();
             return true;
         }
 
         return false;
+    }
+
+    // ----------------------------
+    // クライアントからホストへ同一宛先のワープ要求を連打しないよう制御する
+    // ----------------------------
+    private bool TryRequestRemoteWarpSync(string reason, string? horseIdOverride = null)
+    {
+        if (Game1.IsMasterGame)
+        {
+            return false;
+        }
+
+        string? horseId = horseIdOverride;
+        if (string.IsNullOrWhiteSpace(horseId))
+        {
+            horseId = this.trackedHorseId;
+        }
+
+        if (string.IsNullOrWhiteSpace(horseId) && this.trackedHorse is not null)
+        {
+            horseId = HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        }
+
+        if (string.IsNullOrWhiteSpace(horseId))
+        {
+            return false;
+        }
+
+        string locationName = Game1.player.currentLocation.NameOrUniqueName;
+        Point playerTile = Game1.player.TilePoint;
+        long nowMs = Environment.TickCount64;
+
+        bool sameDestination = string.Equals(this.lastRemoteWarpRequestLocationName, locationName, StringComparison.OrdinalIgnoreCase)
+            && this.lastRemoteWarpRequestPlayerTile is Point lastTile
+            && lastTile == playerTile;
+
+        if (sameDestination && nowMs - this.lastRemoteWarpRequestAtMs < 1000)
+        {
+            return false;
+        }
+
+        this.lastRemoteWarpRequestAtMs = nowMs;
+        this.lastRemoteWarpRequestLocationName = locationName;
+        this.lastRemoteWarpRequestPlayerTile = playerTile;
+
+        this.onRemoteWarpSyncRequested(
+            horseId,
+            locationName,
+            playerTile,
+            Game1.player.FacingDirection
+        );
+
+        return true;
+    }
+
+    // ----------------------------
+    // リモートワープ要求の重複抑制状態を解除する
+    // ----------------------------
+    private void ClearRemoteWarpRequestThrottle()
+    {
+        this.lastRemoteWarpRequestAtMs = 0;
+        this.lastRemoteWarpRequestLocationName = null;
+        this.lastRemoteWarpRequestPlayerTile = null;
     }
 
     // ----------------------------
@@ -658,11 +941,46 @@ internal sealed class HorseFollowManager
             return;
         }
 
+        if (!string.IsNullOrWhiteSpace(this.trackedHorseId))
+        {
+            Horse? claimedHorse = this.findHorseById(this.trackedHorseId);
+            if (claimedHorse is not null && !this.IsHorseDisabled(claimedHorse) && !this.isHorseClaimedByOther(claimedHorse))
+            {
+                this.TrackHorse(claimedHorse);
+                return;
+            }
+        }
+
         Horse? defaultHorse = this.getDefaultTrackedHorse();
         if (defaultHorse is not null)
         {
             this.TrackHorse(defaultHorse);
         }
+    }
+
+    // ----------------------------
+    // 参照が切れた馬を HorseId で引き直す
+    // ----------------------------
+    private bool TryRefreshTrackedHorseReference()
+    {
+        string? horseId = this.trackedHorseId;
+        if (string.IsNullOrWhiteSpace(horseId))
+        {
+            if (this.trackedHorse is null)
+            {
+                return false;
+            }
+
+            horseId = HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        }
+        Horse? refreshedHorse = this.findHorseById(horseId);
+        if (refreshedHorse is null || this.IsHorseDisabled(refreshedHorse) || this.isHorseClaimedByOther(refreshedHorse))
+        {
+            return false;
+        }
+
+        this.TrackHorse(refreshedHorse);
+        return true;
     }
 
     // ----------------------------
@@ -704,13 +1022,40 @@ internal sealed class HorseFollowManager
     // ----------------------------
     // 追跡中の馬情報をクリアする
     // ----------------------------
-    private void ClearTrackedHorse()
+    private void ClearTrackedHorse(bool releaseClaim = true)
     {
+        string? previousHorseId = this.trackedHorseId;
+
         this.ReleaseTrackedHorseCollision();
         this.trackedHorse = null;
+        if (releaseClaim)
+        {
+            this.trackedHorseId = null;
+        }
         this.state = FollowState.Idle;
         this.horseSummonedThisTick = false;
         this.horseFluteWarpRequested = false;
+        this.ClearRemoteWarpRequestThrottle();
+        this.InvalidatePath();
+        this.warpCoordinator.ResetRetryState();
+
+        if (releaseClaim && previousHorseId is not null)
+        {
+            this.onTrackedHorseChanged(previousHorseId, null);
+        }
+    }
+
+    private void DropTrackedHorseReferenceTransient()
+    {
+        if (this.trackedHorse is null && this.trackedHorseId is null)
+        {
+            return;
+        }
+
+        string? horseId = this.trackedHorseId ?? (this.trackedHorse is null ? null : HorseMountRegistry.GetHorseIdKey(this.trackedHorse));
+        this.ReleaseTrackedHorseCollision();
+        this.trackedHorse = null;
+        this.state = FollowState.Idle;
         this.InvalidatePath();
         this.warpCoordinator.ResetRetryState();
     }
@@ -756,17 +1101,40 @@ internal sealed class HorseFollowManager
             return;
         }
 
+        Horse? eligibleMountedHorse = this.GetEligibleMountedHorse();
+        if (!ReferenceEquals(eligibleMountedHorse, horse) && this.isHorseClaimedByOther(horse))
+        {
+            return;
+        }
+
         if (ReferenceEquals(this.trackedHorse, horse))
         {
+            this.trackedHorseId ??= HorseMountRegistry.GetHorseIdKey(horse);
             this.ApplyCollisionPreferences(horse);
             return;
         }
 
+        string? previousHorseId = this.trackedHorse is null
+            ? null
+            : HorseMountRegistry.GetHorseIdKey(this.trackedHorse);
+        string newHorseId = HorseMountRegistry.GetHorseIdKey(horse);
+
         this.ReleaseTrackedHorseCollision();
         this.trackedHorse = horse;
+        this.trackedHorseId = newHorseId;
         this.ApplyCollisionPreferences(horse);
         this.movementService.OnTrackedHorseChanged(horse);
         this.InvalidatePath();
+
+        if (horse.currentLocation == Game1.player.currentLocation)
+        {
+            this.ClearRemoteWarpRequestThrottle();
+        }
+
+        if (!string.Equals(previousHorseId, newHorseId, StringComparison.OrdinalIgnoreCase))
+        {
+            this.onTrackedHorseChanged(previousHorseId, newHorseId);
+        }
     }
 
     // ----------------------------
@@ -834,35 +1202,6 @@ internal sealed class HorseFollowManager
     }
 
     // ----------------------------
-    // 経路を再計算する
-    // ----------------------------
-    private bool RebuildPath(Point targetTile, long nowMs)
-    {
-        if (this.trackedHorse is null)
-        {
-            return false;
-        }
-
-        Point startTile = this.trackedHorse.TilePoint;
-        this.DebugLog($"[PathDebug] rebuild_start start={startTile} goal={targetTile}");
-
-        List<Point>? path = this.pathfinder.BuildPath(this.trackedHorse.currentLocation, this.trackedHorse, startTile, targetTile, out int expanded);
-        if (path is null || path.Count == 0)
-        {
-            this.DebugLog($"[PathDebug] rebuild_failed start={startTile} goal={targetTile} expanded={expanded}");
-            this.movementService.SetPath(null);
-            this.lastPathBuildTimeMs = nowMs;
-            return false;
-        }
-
-        this.DebugLog($"[PathDebug] rebuild_success start={startTile} goal={targetTile} nodes={path.Count} expanded={expanded}");
-        this.movementService.SetPath(path);
-        this.lastPathBuildTimeMs = nowMs;
-        this.lastTargetTile = targetTile;
-        return true;
-    }
-
-    // ----------------------------
     // ホースフルートや騎乗後の自動同行ONを試す
     // ----------------------------
     private void TryAutoEnableFollow()
@@ -881,9 +1220,6 @@ internal sealed class HorseFollowManager
         this.warpCoordinator.ResetRetryState();
         this.ResetPathFailureState();
         this.followEnabled = true;
-        this.DebugLog(ridingEligibleHorse
-            ? "[Follow] follow_enabled reason=mount"
-            : "[Follow] follow_enabled reason=flute");
         this.ShowMessage("message.follow_enabled");
         if (!this.pauseFollowUntilWarp)
         {
@@ -959,13 +1295,11 @@ internal sealed class HorseFollowManager
         switch (this.getConfig().PathFailureAction)
         {
             case 1:
-                this.DebugLog("[Follow] path_failure_action=warp");
                 if (this.TryWarpHorseToPlayer(playSummonEffects: true))
                 {
                     return;
                 }
 
-                this.DebugLog("[Follow] warp_retry_pending");
                 this.state = FollowState.WarpBlocked;
                 return;
 
@@ -979,7 +1313,6 @@ internal sealed class HorseFollowManager
                     this.StopHorse(this.trackedHorse);
                 }
 
-                this.DebugLog("[Follow] follow_disabled reason=path_failure_action");
                 this.ShowMessage("message.follow_disabled");
                 return;
 
@@ -992,7 +1325,6 @@ internal sealed class HorseFollowManager
                     this.StopHorse(this.trackedHorse);
                 }
 
-                this.DebugLog("[Follow] movement_suppressed reason=path_failure_action");
                 return;
 
             default:
@@ -1004,7 +1336,6 @@ internal sealed class HorseFollowManager
                     this.StopHorse(this.trackedHorse);
                 }
 
-                this.DebugLog($"[Follow] paused reason=wait_for_location_change location={this.suspendedLocationName}");
                 return;
         }
     }
@@ -1025,11 +1356,9 @@ internal sealed class HorseFollowManager
                 this.StopHorse(this.trackedHorse);
             }
 
-            this.DebugLog($"[Follow] paused reason=no_path_retry_wait count={this.noPathFailureCount} playerTile={Game1.player.TilePoint}");
             return;
         }
 
-        this.DebugLog($"[Follow] no_path_retry_exhausted count={this.noPathFailureCount}");
         this.HandlePathFailureAction();
     }
 
@@ -1116,6 +1445,7 @@ internal sealed class HorseFollowManager
     private void InvalidatePath()
     {
         this.movementService.InvalidatePath();
+        this.asyncPathService.Reset();
         this.lastTargetTile = null;
         this.lastPathBuildTimeMs = 0;
     }

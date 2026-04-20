@@ -94,6 +94,11 @@ internal sealed class ModConfig
     public bool IgnorePlayerCollision { get; set; } = false;
 
     // ----------------------------
+    // セーブ毎の同行対象外馬ID
+    // ----------------------------
+    public Dictionary<string, List<string>> DisabledHorseIdsBySaveId { get; set; } = new();
+
+    // ----------------------------
     // デバッグモード
     // ----------------------------
     public bool DebugMode { get; set; } = false;
