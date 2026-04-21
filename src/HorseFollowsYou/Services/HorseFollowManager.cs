@@ -468,8 +468,11 @@ internal sealed class HorseFollowManager
 
         if (this.state == FollowState.Paused || this.state == FollowState.WarpBlocked)
         {
-            bool preservePathFailureState = this.noPathRetryPlayerTile is not null;
-            this.EnterFollowPending(!preservePathFailureState);
+            if (!this.asyncPathService.HasPendingRequest())
+            {
+                bool preservePathFailureState = this.noPathRetryPlayerTile is not null;
+                this.EnterFollowPending(!preservePathFailureState);
+            }
         }
 
         if (this.state == FollowState.FollowPending && nowMs < this.followPendingUntilMs)
@@ -550,7 +553,7 @@ internal sealed class HorseFollowManager
 
         if (this.asyncPathService.HasPendingRequest() && !this.HasActivePath())
         {
-            this.state = FollowState.Paused;
+            this.state = FollowState.ArrivedIdle;
             this.StopHorse(this.trackedHorse);
             return;
         }
@@ -641,9 +644,14 @@ internal sealed class HorseFollowManager
         this.lastPathBuildTimeMs = nowMs;
         if (result.Path is null || result.Path.Count == 0)
         {
-            this.movementService.SetPath(null);
-            failed = true;
-            return true;
+            if (!this.HasActivePath())
+            {
+                this.movementService.SetPath(null);
+                failed = true;
+                return true;
+            }
+
+            return false;
         }
 
         this.movementService.SetPath(result.Path);
@@ -1350,7 +1358,6 @@ internal sealed class HorseFollowManager
         {
             this.SetNoPathRetryWait();
             this.state = FollowState.Paused;
-            this.InvalidatePath();
             if (this.trackedHorse is not null)
             {
                 this.StopHorse(this.trackedHorse);
@@ -1442,12 +1449,19 @@ internal sealed class HorseFollowManager
     // ----------------------------
     // 経路情報を消す
     // ----------------------------
-    private void InvalidatePath()
+    private void InvalidatePath(bool resetAsyncRequest = true, bool resetBuildTimestamp = true)
     {
         this.movementService.InvalidatePath();
-        this.asyncPathService.Reset();
+        if (resetAsyncRequest)
+        {
+            this.asyncPathService.Reset();
+        }
+
         this.lastTargetTile = null;
-        this.lastPathBuildTimeMs = 0;
+        if (resetBuildTimestamp)
+        {
+            this.lastPathBuildTimeMs = 0;
+        }
     }
 
     // ----------------------------
