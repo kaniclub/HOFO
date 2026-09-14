@@ -796,6 +796,11 @@ internal sealed class HorseFollowManager
     // ----------------------------
     private void ProcessToggleKey()
     {
+        if (this.IsPlayerBusy())
+        {
+            return;
+        }
+
         if (!this.IsKeybindPressed(this.getConfig().ToggleFollowKey))
         {
             return;
