@@ -241,6 +241,13 @@ internal sealed class HorseFollowManager
             return;
         }
 
+        if (this.IsPlayerBusy())
+        {
+            this.state = FollowState.Paused;
+            this.StopHorse(this.trackedHorse);
+            return;
+        }
+
         if (this.trackedHorse.currentLocation == Game1.player.currentLocation)
         {
             this.ClearRemoteWarpRequestThrottle();
@@ -267,7 +274,7 @@ internal sealed class HorseFollowManager
             return;
         }
 
-        if (this.pauseFollowUntilWarp || !this.followEnabled || !this.getConfig().EnableWarpFollow)
+        if (this.pauseFollowUntilWarp || !this.followEnabled || !this.getConfig().EnableWarpFollow || this.IsPlayerBusy())
         {
             return;
         }
@@ -426,6 +433,18 @@ internal sealed class HorseFollowManager
             }
 
             this.state = FollowState.Idle;
+            return;
+        }
+
+        if (this.IsPlayerBusy())
+        {
+            if (this.state != FollowState.Paused || !this.movementService.HasNoPath())
+            {
+                this.InvalidatePath();
+                this.StopHorse(this.trackedHorse);
+            }
+
+            this.state = FollowState.Paused;
             return;
         }
 
