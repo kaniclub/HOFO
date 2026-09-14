@@ -1,7 +1,7 @@
 {
   "Name": "HorseFollowsYou",
   "Author": "kaniclub",
-  "Version": "1.0.7",
+  "Version": "1.0.8",
   "Description": "Horse follows you",
   "UniqueID": "kaniclub.HorseFollowsYou",
   "EntryDll": "HorseFollowsYou.dll",
