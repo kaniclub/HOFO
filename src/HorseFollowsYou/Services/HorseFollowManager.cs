@@ -806,6 +806,19 @@ internal sealed class HorseFollowManager
             return;
         }
 
+        this.ToggleFollow();
+    }
+
+    // ----------------------------
+    // キーや外部連携から同行を切り替える
+    // ----------------------------
+    public void ToggleFollow()
+    {
+        if (!this.IsEnabled() || this.IsPlayerBusy())
+        {
+            return;
+        }
+
         this.followEnabled = !this.followEnabled;
         this.InvalidatePath();
 

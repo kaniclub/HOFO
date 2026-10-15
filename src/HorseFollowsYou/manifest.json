@@ -1,10 +1,16 @@
 {
   "Name": "HorseFollowsYou",
   "Author": "kaniclub",
-  "Version": "1.0.8",
+  "Version": "1.0.9",
   "Description": "Horse follows you",
   "UniqueID": "kaniclub.HorseFollowsYou",
   "EntryDll": "HorseFollowsYou.dll",
   "MinimumApiVersion": "4.1.0",
-  "UpdateKeys": [ "Nexus:43745" ]
+  "UpdateKeys": [ "Nexus:43745" ],
+  "Dependencies": [
+    {
+      "UniqueID": "furyx639.ToolbarIcons",
+      "IsRequired": false
+    }
+  ]
 }
