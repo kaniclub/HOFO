@@ -18,6 +18,7 @@ namespace HorseFollowsYou;
 // - 設定読込
 // - イベント登録
 // - GMCM 登録
+// - Iconic Framework 登録
 // - マルチプレイの同行馬占有同期
 // - マルチプレイの馬ワープ要求受信
 // ----------------------------
@@ -37,6 +38,7 @@ public sealed class ModEntry : Mod
     private HorseMountRegistry mountRegistry = null!;
     private HorseRemoteAnimationSyncService remoteAnimationSyncService = null!;
     private GmcmIntegration? gmcmIntegration;
+    private IconicFrameworkIntegration? iconicFrameworkIntegration;
     private IReadOnlyList<HorseMountOption> cachedMountOptions = Array.Empty<HorseMountOption>();
     private readonly Dictionary<string, HorseClaimState> horseClaims = new(StringComparer.OrdinalIgnoreCase);
     private bool horseWarpEventSubscribed;
@@ -91,6 +93,14 @@ public sealed class ModEntry : Mod
             this.SaveAllSettings
         );
         this.gmcmIntegration.RegisterOrReload();
+
+        this.iconicFrameworkIntegration = new IconicFrameworkIntegration(
+            this.Helper,
+            this.Helper.Translation,
+            this.Monitor,
+            () => this.followManager?.ToggleFollow()
+        );
+        this.iconicFrameworkIntegration.Register();
     }
 
     // ----------------------------

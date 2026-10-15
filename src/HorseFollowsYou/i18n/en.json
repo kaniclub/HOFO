@@ -25,6 +25,8 @@
   "config.narrow_hitbox.description": "Use a narrower hitbox. Enable this if you use a mod that allows horses to pass through 1-tile-wide paths.",
   "config.ignore_player_collision.name": "Ignore Player Collision",
   "config.ignore_player_collision.description": "Disable collision between the horse and the player.",
+  "icon.toggle_follow.title": "Horse Companion",
+  "icon.toggle_follow.description": "Toggle horse companion mode.",
   "message.follow_enabled": "Horse companion mode turned ON.",
   "message.follow_disabled": "Horse companion mode turned OFF.",
   "config.auto_enable_follow.name": "Enable Follow on Mount / Flute",

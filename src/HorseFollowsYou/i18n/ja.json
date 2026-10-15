@@ -25,6 +25,8 @@
   "config.narrow_hitbox.description": "細い判定を使います。1マス通路対応のModが入っている場合有効にしてください。",
   "config.ignore_player_collision.name": "プレイヤー貫通",
   "config.ignore_player_collision.description": "馬とプレイヤーの衝突を無くします。",
+  "icon.toggle_follow.title": "馬の同行",
+  "icon.toggle_follow.description": "馬の同行の開始 / 停止を切り替えます。",
   "message.follow_enabled": "馬の同行をONにしました",
   "message.follow_disabled": "馬の同行をOFFにしました",
   "config.auto_enable_follow.name": "騎乗/フルートで同行ON",
